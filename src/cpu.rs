@@ -1,4 +1,4 @@
-use std::num;
+use std::{num, borrow::BorrowMut, process::{exit, ExitCode}};
 
 use crate::Memory;
 
@@ -31,7 +31,13 @@ pub struct Cpu {
     mem: Memory,
     cc: CpuFlags,
 
-    int_enable: u8,
+    inte: bool,
+}
+
+impl CpuFlags {
+    fn encode_u8 (&self) {
+        let res: u8 = (self.z as u8) | ((self.s as u8) << 1) | ((self.p as u8) << 2) | ((self.cy as u8) << 3) || ((self.ac as u8) << 4);
+    }
 }
 
 impl Cpu {
@@ -59,7 +65,7 @@ impl Cpu {
                 pad: 0,
             },
 
-            int_enable: 0,
+            inte: false,
         }
     }
 
@@ -138,69 +144,133 @@ impl Cpu {
             // 0x3e	MVI A,D8	2		A <- byte 2
             // 0x3f	CMC	1	CY	CY=!CY
             // 0x40	MOV B,B	1		B <- B
+            0x40 => { self.b = self.b; }
             // 0x41	MOV B,C	1		B <- C
+            0x41 => { self.b = self.c; }
             // 0x42	MOV B,D	1		B <- D
+            0x42 => { self.b = self.d; }
             // 0x43	MOV B,E	1		B <- E
+            0x43 => { self.b = self.e; }
             // 0x44	MOV B,H	1		B <- H
+            0x44 => { self.b = self.h; }
             // 0x45	MOV B,L	1		B <- L
+            0x45 => { self.b = self.l; }
             // 0x46	MOV B,M	1		B <- (HL)
+            0x46 => { self.b = self.mem[addr]; }
             // 0x47	MOV B,A	1		B <- A
+            0x47 => { self.b = self.a; }
             // 0x48	MOV C,B	1		C <- B
+            0x48 => { self.c = self.b; }
             // 0x49	MOV C,C	1		C <- C
+            0x49 => { self.c = self.c; }
             // 0x4a	MOV C,D	1		C <- D
+            0x4A => { self.c = self.d; }
             // 0x4b	MOV C,E	1		C <- E
+            0x4B => { self.c = self.e; }
             // 0x4c	MOV C,H	1		C <- H
+            0x4C => { self.c = self.h; }
             // 0x4d	MOV C,L	1		C <- L
+            0x4D => { self.c = self.l; }
             // 0x4e	MOV C,M	1		C <- (HL)
+            0x4E => { self.c = self.mem[addr]; }
             // 0x4f	MOV C,A	1		C <- A
+            0x4F => { self.c = self.a; }
             // 0x50	MOV D,B	1		D <- B
+            0x50 => { self.d = self.b; }
             // 0x51	MOV D,C	1		D <- C
+            0x51 => { self.d = self.c; }
             // 0x52	MOV D,D	1		D <- D
+            0x52 => { self.d = self.d; }
             // 0x53	MOV D,E	1		D <- E
+            0x53 => { self.d = self.e; }
             // 0x54	MOV D,H	1		D <- H
+            0x54 => { self.d = self.h; }
             // 0x55	MOV D,L	1		D <- L
+            0x55 => { self.d = self.l; }
             // 0x56	MOV D,M	1		D <- (HL)
+            0x56 => { self.d = self.mem[addr]; }
             // 0x57	MOV D,A	1		D <- A
+            0x57 => { self.d = self.a; }
             // 0x58	MOV E,B	1		E <- B
+            0x58 => { self.e = self.b }
             // 0x59	MOV E,C	1		E <- C
+            0x59 => { self.e = self.c }
             // 0x5a	MOV E,D	1		E <- D
+            0x5A => { self.e = self.d }
             // 0x5b	MOV E,E	1		E <- E
+            0x5B => { self.e = self.e }
             // 0x5c	MOV E,H	1		E <- H
+            0x5C => { self.e = self.h }
             // 0x5d	MOV E,L	1		E <- L
+            0x5D => { self.e = self.l }
             // 0x5e	MOV E,M	1		E <- (HL)
+            0x5E => { self.e = self.mem[addr] }
             // 0x5f	MOV E,A	1		E <- A
+            0x5F => { self.e = self.a }
             // 0x60	MOV H,B	1		H <- B
+            0x60 => { self.h = self.b }
             // 0x61	MOV H,C	1		H <- C
+            0x61 => { self.h = self.c }
             // 0x62	MOV H,D	1		H <- D
+            0x62 => { self.h = self.d }
             // 0x63	MOV H,E	1		H <- E
+            0x63 => { self.h = self.e }
             // 0x64	MOV H,H	1		H <- H
+            0x64 => { self.h = self.h }
             // 0x65	MOV H,L	1		H <- L
+            0x65 => { self.h = self.l }
             // 0x66	MOV H,M	1		H <- (HL)
+            0x66 => { self.h = self.mem[addr] }
             // 0x67	MOV H,A	1		H <- A
+            0x67 => { self.h = self.a }
             // 0x68	MOV L,B	1		L <- B
+            0x68 => { self.l = self.b }
             // 0x69	MOV L,C	1		L <- C
+            0x69 => { self.l = self.c }
             // 0x6a	MOV L,D	1		L <- D
+            0x6A => { self.l = self.d }
             // 0x6b	MOV L,E	1		L <- E
+            0x6B => { self.l = self.e }
             // 0x6c	MOV L,H	1		L <- H
+            0x6C => { self.l = self.h }
             // 0x6d	MOV L,L	1		L <- L
+            0x6D => { self.l = self.l }
             // 0x6e	MOV L,M	1		L <- (HL)
+            0x6E => { self.l = self.mem[addr] }
             // 0x6f	MOV L,A	1		L <- A
+            0x6F => { self.l = self.a }
             // 0x70	MOV M,B	1		(HL) <- B
+            0x70 => { self.mem[addr] = self.b }
             // 0x71	MOV M,C	1		(HL) <- C
+            0x71 => { self.mem[addr] = self.c }
             // 0x72	MOV M,D	1		(HL) <- D
+            0x72 => { self.mem[addr] = self.d }
             // 0x73	MOV M,E	1		(HL) <- E
+            0x73 => { self.mem[addr] = self.e }
             // 0x74	MOV M,H	1		(HL) <- H
+            0x74 => { self.mem[addr] = self.h }
             // 0x75	MOV M,L	1		(HL) <- L
+            0x75 => { self.mem[addr] = self.l }
             // 0x76	HLT	1		special
+            0x76 => { exit(0) }
             // 0x77	MOV M,A	1		(HL) <- A
+            0x77 => { self.mem[addr] = self.a }
             // 0x78	MOV A,B	1		A <- B
+            0x78 => { self.a = self.b }
             // 0x79	MOV A,C	1		A <- C
+            0x79 => { self.a = self.c }
             // 0x7a	MOV A,D	1		A <- D
+            0x7A => { self.a = self.d }
             // 0x7b	MOV A,E	1		A <- E
+            0x7B => { self.a = self.e }
             // 0x7c	MOV A,H	1		A <- H
+            0x7C => { self.a = self.h }
             // 0x7d	MOV A,L	1		A <- L
+            0x7D => { self.a = self.l }
             // 0x7e	MOV A,M	1		A <- (HL)
+            0x7E => { self.a = self.mem[addr] }
             // 0x7f	MOV A,A	1		A <- A
+            0x7F => { self.a = self.a }
             // ADD B
             0x80 => self.op_add(self.b),
             // ADD C
@@ -326,6 +396,10 @@ impl Cpu {
                 }
             }
             // 0xc1	POP B	1		C <- (sp); B <- (sp+1); sp <- sp+2
+            0xC1 => {
+                self.stack.push(self.b as u16);
+                self.stack.push(self.c as u16);
+            }
             // 0xc2	JNZ adr	3		if NZ, PC <- adr
             0xC2 => {
                 if !self.cc.z {
@@ -384,6 +458,10 @@ impl Cpu {
                 }
             }
             // 0xd1	POP D	1		E <- (sp); D <- (sp+1); sp <- sp+2
+            0xD1 => {
+                self.e = self.stack.pop().unwrap() as u8;
+                self.d = self.stack.pop().unwrap() as u8;
+            }
             // 0xd2	JNC adr	3		if NCY, PC<-adr
             0xD2 => {
                 if !self.cc.cy {
@@ -393,6 +471,7 @@ impl Cpu {
                 num_ops = 3;
             }
             // 0xd3	OUT D8	2		special
+            0xD3 => {}
             // 0xd4	CNC adr	3		if NCY, CALL adr
             0xD4 => {
                 if !self.cc.cy {
@@ -415,6 +494,7 @@ impl Cpu {
                 num_ops = 3;
             }
             // 0xdb	IN D8	2		special
+            0xDB => {}
             // 0xdc	CC adr	3		if CY, CALL adr
             0xDC => {
                 if self.cc.cy {
@@ -433,6 +513,10 @@ impl Cpu {
                 }
             }
             // 0xe1	POP H	1		L <- (sp); H <- (sp+1); sp <- sp+2
+            0xE1 => {
+                self.l = self.stack.pop().unwrap() as u8;
+                self.h = self.stack.pop().unwrap() as u8;
+            }
             // 0xe2	JPO adr	3		if PO, PC <- adr
             0xE2 => {
                 if self.cc.p {
@@ -451,6 +535,10 @@ impl Cpu {
                 num_ops = 3;
             }
             // 0xe5	PUSH H	1		(sp-2)<-L; (sp-1)<-H; sp <- sp - 2
+            0xE5 => {
+                self.c = self.stack.pop().unwrap() as u8;
+                self.b = self.stack.pop().unwrap() as u8;
+            }
             // 0xe6	ANI D8	2	Z, S, P, CY, AC	A <- A & data
             // 0xe7	RST 4	1		CALL $20
             // 0xe8	RPE	1		if PE, RET
@@ -496,6 +584,9 @@ impl Cpu {
                 num_ops = 3;
             }
             // 0xf3	DI	1		special
+            0xF3 => {
+                self.inte = false;
+            }
             // 0xf4	CP adr	3		if P, PC <- adr
             // 0xf5	PUSH PSW	1		(sp-2)<-flags; (sp-1)<-A; sp <- sp - 2
             // 0xf6	ORI D8	2	Z, S, P, CY, AC	A <- A | data
@@ -511,6 +602,9 @@ impl Cpu {
                 num_ops = 3;
             }
             // 0xfb	EI	1		special
+            0xFB => {
+                self.inte = true;
+            }
             // 0xfc	CM adr	3		if M, CALL adr
             // 0xfd	-
             // 0xfe	CPI D8	2	Z, S, P, CY, AC	A - data
