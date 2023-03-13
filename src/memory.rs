@@ -1,7 +1,25 @@
-use std::fs;
+use std::{
+    fs,
+    ops::{Index, IndexMut},
+    process::Output,
+};
 
 pub struct Memory {
     pub ram: Vec<u8>,
+}
+
+impl Index<u16> for Memory {
+    type Output = u8;
+
+    fn index(&self, index: u16) -> &Self::Output {
+        &self.ram[index as usize]
+    }
+}
+
+impl IndexMut<u16> for Memory {
+    fn index_mut(&mut self, index: u16) -> &mut Self::Output {
+        &mut self.ram[index as usize]
+    }
 }
 
 impl Memory {
@@ -33,6 +51,7 @@ impl Memory {
                 }
                 0x01 => {
                     println!("LXI   B, ${:02X}{:02X}", b2, b1);
+                    opbytes = 3;
                 }
                 0x02 => {
                     println!("STAX  B");
@@ -82,7 +101,8 @@ impl Memory {
                     println!("NOP");
                 }
                 0x11 => {
-                    println!("LXI   D, ${:02X}{:02X}", b2, b1);
+                    println!("LXI   D, #${:02X}{:02X}", b2, b1);
+                    opbytes = 3;
                 }
                 0x12 => {
                     println!("STAX  D");
@@ -97,7 +117,7 @@ impl Memory {
                     println!("DCR   D");
                 }
                 0x16 => {
-                    println!("MVI   D, ${:02X}", b1);
+                    println!("MVI   D, #${:02X}", b1);
                     opbytes = 2;
                 }
                 0x17 => {
@@ -122,7 +142,7 @@ impl Memory {
                     println!("DCR   E");
                 }
                 0x1E => {
-                    println!("MVI   E, ${:02X}", b1);
+                    println!("MVI   E, #${:02X}", b1);
                     opbytes = 2;
                 }
                 0x1F => {
@@ -132,10 +152,10 @@ impl Memory {
                     println!("NOP");
                 }
                 0x21 => {
-                    println!("LXI   H, ${:02X}{:02X}", b2, b1);
+                    println!("LXI   H, #${:02X}{:02X}", b2, b1);
                 }
                 0x22 => {
-                    println!("SHLD  ${:02X}{:02X}", b2, b1);
+                    println!("SHLD  #${:02X}{:02X}", b2, b1);
                     opbytes = 3;
                 }
                 0x23 => {
@@ -148,7 +168,7 @@ impl Memory {
                     println!("DCR   H");
                 }
                 0x26 => {
-                    println!("MVI   H, ${:02X}", b1);
+                    println!("MVI   H, #${:02X}", b1);
                     opbytes = 2;
                 }
                 0x27 => {
@@ -161,7 +181,7 @@ impl Memory {
                     println!("DAD   H");
                 }
                 0x2A => {
-                    println!("LHLD  ${:02X}{:02X}", b2, b1);
+                    println!("LHLD  #${:02X}{:02X}", b2, b1);
                     opbytes = 3;
                 }
                 0x2B => {
@@ -174,7 +194,7 @@ impl Memory {
                     println!("DCR   L");
                 }
                 0x2E => {
-                    println!("MVI   L, ${:02X}", b1);
+                    println!("MVI   L, #${:02X}", b1);
                     opbytes = 2;
                 }
                 0x2F => {
@@ -184,7 +204,8 @@ impl Memory {
                     println!("NOP");
                 }
                 0x31 => {
-                    println!("LXI   SP, ${:02X}{:02X}", b2, b1);
+                    println!("LXI   SP, #${:02X}{:02X}", b2, b1);
+                    opbytes = 3;
                 }
                 0x32 => {
                     println!("STA   ${:02X}{:02X}", b2, b1);
@@ -200,7 +221,7 @@ impl Memory {
                     println!("DCR   M");
                 }
                 0x36 => {
-                    println!("MVI   M, ${:02X}", b1);
+                    println!("MVI   M, #${:02X}", b1);
                     opbytes = 2;
                 }
                 0x37 => {
@@ -213,7 +234,7 @@ impl Memory {
                     println!("DAD   SP");
                 }
                 0x3A => {
-                    println!("LDA   ${:02X}{:02X}", b2, b1);
+                    println!("LDA   #${:02X}{:02X}", b2, b1);
                     opbytes = 3;
                 }
                 0x3B => {
@@ -226,7 +247,7 @@ impl Memory {
                     println!("DCR   A");
                 }
                 0x3E => {
-                    println!("MVI   A, #{:#02x}", b1);
+                    println!("MVI   A, #${:02X}", b1);
                     opbytes = 2;
                 }
                 0x3F => {
@@ -650,16 +671,20 @@ impl Memory {
                     println!("RET");
                 }
                 0xCA => {
-                    println!("JZ    {:#04X}", self.ram[pc + 1]);
+                    println!("JZ    ${:02X}{:02X}", b2, b1);
+                    opbytes = 3;
                 }
                 0xCB => {
-                    println!("JMP   {:#04X}", self.ram[pc + 1]);
+                    println!("JMP   ${:02X}{:02X}", b2, b1);
+                    opbytes = 3;
                 }
                 0xCC => {
-                    println!("CZ    {:#04X}", self.ram[pc + 1]);
+                    println!("CZ    ${:02X}{:02X}", b2, b1);
+                    opbytes = 3;
                 }
                 0xCD => {
-                    println!("CALL  {:#04X}", self.ram[pc + 1]);
+                    println!("CALL  ${:02X}{:02X}", b2, b1);
+                    opbytes = 3;
                 }
                 0xCE => {
                     println!("ACI   {:#02X}", self.ram[pc + 1]);

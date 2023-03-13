@@ -1,7 +1,9 @@
 use clap::Parser;
 use memory::Memory;
+use cpu::Cpu;
 
 mod memory;
+mod cpu;
 
 /// 8080 Emulator in Rust
 #[derive(Parser, Debug)]
