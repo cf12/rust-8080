@@ -1,3 +1,5 @@
+use std::io::stdin;
+
 use clap::Parser;
 use memory::Memory;
 use cpu::Cpu;
@@ -26,7 +28,14 @@ pub fn main() {
     // let mut gui = SDLGui::new(cpu, args.scale);
     // gui.run();
 
-    let mut mem = Memory::new();
-    mem.load_rom(&args.rom_file);
-    mem.disas();
+    let mut cpu = Cpu::new();
+    cpu.load_rom(&args.rom_file);
+
+    loop {
+        let mut line = String::new();
+        stdin().read_line(&mut line).unwrap();
+
+        cpu.cycle();
+        println!("{}", cpu);
+    }
 }

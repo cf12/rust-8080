@@ -1,8 +1,5 @@
-use std::{
-    borrow::BorrowMut,
-    num,
-    process::{exit, ExitCode},
-};
+use core::{fmt, num};
+use std::process::exit;
 
 use crate::Memory;
 
@@ -31,7 +28,6 @@ pub struct Cpu {
     sp: u16,
     pc: u16,
 
-    stack: Vec<u16>,
     mem: Memory,
     cc: CpuFlags,
 
@@ -56,6 +52,17 @@ impl CpuFlags {
     }
 }
 
+impl fmt::Display for Cpu {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[a]: {:02X}\n", self.a)?;
+        write!(f, "[bc]: {:02X}{:02X}\n", self.b, self.c)?;
+        write!(f, "[de]: {:02X}{:02X}\n", self.d, self.e)?;
+        write!(f, "[hl]: {:02X}{:02X}\n", self.h, self.l)?;
+        write!(f, "[sp]: {:04X}\n", self.sp)?;
+        write!(f, "[pc]: {:04X}\n", self.pc)
+    }
+}
+
 impl Cpu {
     pub fn new() -> Cpu {
         Cpu {
@@ -70,7 +77,6 @@ impl Cpu {
             sp: 0,
             pc: 0,
 
-            stack: vec![],
             mem: Memory::new(),
             cc: CpuFlags {
                 z: false,
@@ -85,6 +91,10 @@ impl Cpu {
         }
     }
 
+    pub fn load_rom(&mut self, path: &String) {
+        self.mem.load_rom(path);
+    }
+
     pub fn cycle(&mut self) {
         let op = self.mem[self.pc];
         let op1 = self.mem[self.pc + 1];
@@ -95,7 +105,7 @@ impl Cpu {
         let hl = ((self.h as u16) << 8) | self.l as u16;
         let bc = ((self.b as u16) << 8) | self.c as u16;
         let de = ((self.d as u16) << 8) | self.e as u16;
-        let data = ((op2 as u16) << 8) | op1 as u16;
+        let addr = ((op2 as u16) << 8) | op1 as u16;
 
         match op {
             // 0x00	NOP	1
@@ -237,6 +247,10 @@ impl Cpu {
             // 0x2f	CMA	1		A <- !A
             // 0x30	-
             // 0x31	LXI SP, D16	3		SP.hi <- byte 3, SP.lo <- byte 2
+            0x31 => {
+                self.sp = addr;
+                num_ops = 3;
+            }
             // 0x32	STA adr	3		(adr) <- A
             // 0x33	INX SP	1		SP = SP + 1
             // 0x34	INR M	1	Z, S, P, AC	(HL) <- (HL)+1
@@ -546,33 +560,79 @@ impl Cpu {
                     self.op_ret();
                 }
             }
+
             // 0xc1	POP B	1		C <- (sp); B <- (sp+1); sp <- sp+2
             0xC1 => {
-                self.stack.push(self.b as u16);
-                self.stack.push(self.c as u16);
+                self.c = self.mem[self.sp];
+                self.b = self.mem[self.sp + 1];
+                self.sp += 2;
             }
+            // 0xd1	POP D	1		E <- (sp); D <- (sp+1); sp <- sp+2
+            0xD1 => {
+                self.e = self.mem[self.sp];
+                self.d = self.mem[self.sp + 1];
+                self.sp += 2;
+            }
+            // 0xe1	POP H	1		L <- (sp); H <- (sp+1); sp <- sp+2
+            0xE1 => {
+                self.l = self.mem[self.sp];
+                self.h = self.mem[self.sp + 1];
+                self.sp += 2;
+            }
+            // 0xf1	POP PSW	1		flags <- (sp); A <- (sp+1); sp <- sp+2
+            0xF1 => {
+                self.cc.decode_u8(self.mem[self.sp]);
+                self.a = self.mem[self.sp + 1];
+                self.sp += 2;
+            }
+
+            // 0xc5	PUSH B	1		(sp-2)<-C; (sp-1)<-B; sp <- sp - 2
+            0xC5 => {
+                self.mem[self.sp - 1] = self.b;
+                self.mem[self.sp - 2] = self.c;
+                self.sp -= 2;
+            }
+            // 0xd5	PUSH D	1		(sp-2)<-E; (sp-1)<-D; sp <- sp - 2
+            0xD5 => {
+                self.mem[self.sp - 1] = self.d;
+                self.mem[self.sp - 2] = self.e;
+                self.sp -= 2;
+            }
+            // 0xe5	PUSH H	1		(sp-2)<-L; (sp-1)<-H; sp <- sp - 2
+            0xE5 => {
+                self.mem[self.sp - 1] = self.h;
+                self.mem[self.sp - 2] = self.l;
+                self.sp -= 2;
+            }
+            // 0xf5	PUSH PSW	1		(sp-2)<-flags; (sp-1)<-A; sp <- sp - 2
+            0xF5 => {
+                self.mem[self.sp - 1] = self.a;
+                self.mem[self.sp - 2] = self.cc.encode_u8();
+                self.sp -= 2;
+            }
+
             // 0xc2	JNZ adr	3		if NZ, PC <- adr
             0xC2 => {
                 if !self.cc.z {
-                    self.op_jump(hl);
+                    self.op_jump(addr);
+                    num_ops = 0;
+                } else {
+                    num_ops = 3;
                 }
-
-                num_ops = 3;
             }
             // 0xc3	JMP adr	3		PC <= adr
             0xC3 => {
-                self.op_jump(hl);
-                num_ops = 3;
+                self.op_jump(addr);
+                num_ops = 0;
             }
             // 0xc4	CNZ adr	3		if NZ, CALL adr
             0xC4 => {
                 if !self.cc.z {
-                    self.op_call(hl);
+                    self.op_call(addr);
                 }
 
                 num_ops = 3;
             }
-            // 0xc5	PUSH B	1		(sp-2)<-C; (sp-1)<-B; sp <- sp - 2
             // 0xc6	ADI D8	2	Z, S, P, CY, AC	A <- A + byte
             // 0xc7	RST 0	1		CALL $0
             // 0xc8	RZ	1		if Z, RET
@@ -600,6 +660,10 @@ impl Cpu {
                 num_ops = 3;
             }
             // 0xcd	CALL adr	3		(SP-1)<-PC.hi;(SP-2)<-PC.lo;SP<-SP-2;PC=adr
+            0xCD => {
+                self.op_call(addr);
+                num_ops = 0;
+            }
             // 0xce	ACI D8	2	Z, S, P, CY, AC	A <- A + data + CY
             // 0xcf	RST 1	1		CALL $8
             // 0xd0	RNC	1		if NCY, RET
@@ -607,11 +671,6 @@ impl Cpu {
                 if !self.cc.cy {
                     self.op_ret();
                 }
-            }
-            // 0xd1	POP D	1		E <- (sp); D <- (sp+1); sp <- sp+2
-            0xD1 => {
-                self.e = self.stack.pop().unwrap() as u8;
-                self.d = self.stack.pop().unwrap() as u8;
             }
             // 0xd2	JNC adr	3		if NCY, PC<-adr
             0xD2 => {
@@ -631,7 +690,6 @@ impl Cpu {
 
                 num_ops = 3;
             }
-            // 0xd5	PUSH D	1		(sp-2)<-E; (sp-1)<-D; sp <- sp - 2
             // 0xd6	SUI D8	2	Z, S, P, CY, AC	A <- A - data
             // 0xd7	RST 2	1		CALL $10
             // 0xd8	RC	1		if CY, RET
@@ -663,11 +721,6 @@ impl Cpu {
                     self.op_ret()
                 }
             }
-            // 0xe1	POP H	1		L <- (sp); H <- (sp+1); sp <- sp+2
-            0xE1 => {
-                self.l = self.stack.pop().unwrap() as u8;
-                self.h = self.stack.pop().unwrap() as u8;
-            }
             // 0xe2	JPO adr	3		if PO, PC <- adr
             0xE2 => {
                 if self.cc.p {
@@ -684,11 +737,6 @@ impl Cpu {
                 }
 
                 num_ops = 3;
-            }
-            // 0xe5	PUSH H	1		(sp-2)<-L; (sp-1)<-H; sp <- sp - 2
-            0xE5 => {
-                self.c = self.stack.pop().unwrap() as u8;
-                self.b = self.stack.pop().unwrap() as u8;
             }
             // 0xe6	ANI D8	2	Z, S, P, CY, AC	A <- A & data
             // 0xe7	RST 4	1		CALL $20
@@ -725,7 +773,6 @@ impl Cpu {
                     self.op_ret()
                 }
             }
-            // 0xf1	POP PSW	1		flags <- (sp); A <- (sp+1); sp <- sp+2
             // 0xf2	JP adr	3		if P=1 PC <- adr
             0xF2 => {
                 if self.cc.s {
@@ -739,7 +786,6 @@ impl Cpu {
                 self.inte = false;
             }
             // 0xf4	CP adr	3		if P, PC <- adr
-            // 0xf5	PUSH PSW	1		(sp-2)<-flags; (sp-1)<-A; sp <- sp - 2
             // 0xf6	ORI D8	2	Z, S, P, CY, AC	A <- A | data
             // 0xf7	RST 6	1		CALL $30
             // 0xf8	RM	1		if M, RET
@@ -816,11 +862,14 @@ impl Cpu {
     }
 
     fn op_call(&mut self, addr: u16) {
-        self.stack.push(self.pc);
+        self.mem[self.sp - 1] = self.pc as u8;
+        self.mem[self.sp - 2] = (self.pc >> 2) as u8;
         self.pc = addr;
+        self.sp -= 2;
     }
 
     fn op_ret(&mut self) {
-        self.pc = self.stack.pop().unwrap();
+        self.pc = ((self.mem[self.sp + 1] as u16) << 2) | self.mem[self.sp + 2] as u16;
+        self.sp += 2
     }
 }
