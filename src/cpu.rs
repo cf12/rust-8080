@@ -54,12 +54,12 @@ impl CpuFlags {
 
 impl fmt::Display for Cpu {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[a]: {:02X} | ", self.a)?;
+        write!(f, "[af]: {:02X}{:02X} | ", self.a, self.cc.encode_u8())?;
         write!(f, "[bc]: {:02X}{:02X} | ", self.b, self.c)?;
         write!(f, "[de]: {:02X}{:02X} | ", self.d, self.e)?;
         write!(f, "[hl]: {:02X}{:02X}\n", self.h, self.l)?;
-        write!(f, "[sp]: {:04X} | ", self.sp)?;
         write!(f, "[pc]: {:04X} | ", self.pc)?;
+        write!(f, "[sp]: {:04X} | ", self.sp)?;
         write!(f, "[op]: {:02X}\n", self.mem[self.pc])
     }
 }
@@ -107,10 +107,96 @@ impl Cpu {
         return ((self.mem[self.pc - 1] as u16) << 8) | (self.mem[self.pc - 2] as u16);
     }
 
+    fn set_hl(&mut self, hl: u16) {
+        self.h = (hl >> 8) as u8;
+        self.l = (hl & 0xFF) as u8
+    }
+
+    fn set_bc(&mut self, bc: u16) {
+        self.b = (bc >> 8) as u8;
+        self.c = (bc & 0xFF) as u8
+    }
+
+    fn set_de(&mut self, de: u16) {
+        self.d = (de >> 8) as u8;
+        self.e = (de & 0xFF) as u8
+    }
+
+    fn hl(&self) -> u16 {
+        return ((self.h as u16) << 8) | self.l as u16;
+    }
+
+    fn bc(&self) -> u16 {
+        return ((self.b as u16) << 8) | self.c as u16;
+    }
+
+    fn de(&self) -> u16 {
+        return ((self.d as u16) << 8) | self.e as u16;
+    }
+
+    fn update_cc(&mut self, num: u8) {
+        self.cc.z = num == 0;
+        self.cc.s = num >> 7 == 1;
+        self.cc.p = num & 1 == 1;
+    }
+
+    fn update_cc_cy(&mut self, num: u8, cy: bool) {
+        self.update_cc(num);
+        self.cc.cy = cy;
+    }
+
+    fn op_add(&mut self, rhs: u8) {
+        let (sum, overflow) = self.a.overflowing_add(rhs);
+
+        self.a = sum;
+        self.update_cc_cy(sum, overflow);
+    }
+
+    fn op_sub(&mut self, rhs: u8) {
+        let (res, overflow) = self.a.overflowing_sub(rhs);
+
+        self.a = res;
+        self.update_cc_cy(res, overflow);
+    }
+
+    fn op_and(&mut self, rhs: u8) {
+        let res = self.a & rhs;
+        self.a = res;
+        self.update_cc_cy(res, false);
+    }
+
+    fn op_or(&mut self, rhs: u8) {
+        let res = self.a | rhs;
+        self.a = res;
+        self.update_cc_cy(res, false);
+    }
+
+    fn op_xor(&mut self, rhs: u8) {
+        let res = self.a ^ rhs;
+        self.a = res;
+        self.update_cc_cy(res, false);
+    }
+
+    fn op_jump(&mut self, addr: u16) {
+        self.pc = addr;
+    }
+
+    fn op_call(&mut self, addr: u16) {
+        self.mem[self.sp - 1] = self.pc as u8;
+        self.mem[self.sp - 2] = (self.pc >> 2) as u8;
+        self.pc = addr;
+        self.sp -= 2;
+    }
+
+    fn op_ret(&mut self) {
+        self.pc = ((self.mem[self.sp + 1] as u16) << 2) | self.mem[self.sp + 2] as u16;
+        self.sp += 2
+    }
+
     pub fn cycle(&mut self) {
         let op = self.next_byte();
 
-        // TODO: optimize these calls to only occur in ops
+        // TODO: optimize
         let hl = ((self.h as u16) << 8) | self.l as u16;
         let bc = ((self.b as u16) << 8) | self.c as u16;
         let de = ((self.d as u16) << 8) | self.e as u16;
@@ -118,13 +204,38 @@ impl Cpu {
         match op {
             // 0x00	NOP	1
             0x00 => {}
+
             // 0x01	LXI B,D16	3		B <- byte 3, C <- byte 2
             0x01 => {
                 self.c = self.next_byte();
                 self.b = self.next_byte();
             }
+            // 0x11	LXI D,D16	3		D <- byte 3, E <- byte 2
+            0x11 => {
+                self.e = self.next_byte();
+                self.d = self.next_byte();
+            }
+            // 0x21	LXI H,D16	3		H <- byte 3, L <- byte 2
+            0x21 => {
+                self.l = self.next_byte();
+                self.h = self.next_byte();
+            }
+            // 0x31	LXI SP, D16	3		SP.hi <- byte 3, SP.lo <- byte 2
+            0x31 => {
+                self.sp = self.next_word();
+            }
+
             // 0x02	STAX B	1		(BC) <- A
-            // 0x03	INX B	1		BC <- BC+1
+
+            // 0x03	INX B	1		BC <- BC + 1
+            0x03 => self.set_bc(bc + 1),
+            // 0x13	INX D	1		DE <- DE + 1
+            0x13 => self.set_de(de + 1),
+            // 0x23	INX H	1		HL <- HL + 1
+            0x23 => self.set_hl(hl + 1),
+            // 0x33	INX SP	1		SP = SP + 1
+            0x33 => self.set_hl(self.sp + 1),
+
             // 0x04	INR B	1	Z, S, P, AC	B <- B+1
             0x04 => {
                 self.b += 1;
@@ -133,7 +244,8 @@ impl Cpu {
 
             // 0x05	DCR B	1	Z, S, P, AC	B <- B-1
             0x05 => {
-                self.b -= 1;
+                // TODO: this doesn't update ac
+                self.b = self.b.wrapping_sub(1);
                 self.update_cc(self.b);
             }
             // 0x0d	DCR C	1	Z, S, P, AC	C <-C-1
@@ -211,8 +323,7 @@ impl Cpu {
             // 0x09	DAD B	1	CY	HL = HL + BC
             0x09 => {
                 let (res, cy) = hl.overflowing_add(bc);
-                self.h = (res >> 8) as u8;
-                self.l = (res & 0x0F) as u8;
+                self.set_hl(res);
                 self.cc.cy = cy;
             }
             // 0x19	DAD D	1	CY	HL = HL + DE
@@ -220,24 +331,24 @@ impl Cpu {
             // 0x39	DAD SP	1	CY	HL = HL + SP
 
             // 0x0a	LDAX B	1		A <- (BC)
+            0x0A => self.a = self.mem[bc],
+            // 0x1a	LDAX D	1		A <- (DE)
+            0x1A => self.a = self.mem[de],
+
             // 0x0b	DCX B	1		BC = BC-1
             // 0x0c	INR C	1	Z, S, P, AC	C <- C+1
             // 0x0f	RRC	1	CY	A = A >> 1; bit 7 = prev bit 0; CY = prev bit 0
             // 0x10	-
-            // 0x11	LXI D,D16	3		D <- byte 3, E <- byte 2
+
             // 0x12	STAX D	1		(DE) <- A
-            // 0x13	INX D	1		DE <- DE + 1
             // 0x14	INR D	1	Z, S, P, AC	D <- D+1
             // 0x17	RAL	1	CY	A = A << 1; bit 0 = prev CY; CY = prev bit 7
             // 0x18	-
-            // 0x1a	LDAX D	1		A <- (DE)
             // 0x1b	DCX D	1		DE = DE-1
             // 0x1c	INR E	1	Z, S, P, AC	E <-E+1
             // 0x1f	RAR	1	CY	A = A >> 1; bit 7 = prev bit 7; CY = prev bit 0
             // 0x20	-
-            // 0x21	LXI H,D16	3		H <- byte 3, L <- byte 2
             // 0x22	SHLD adr	3		(adr) <-L; (adr+1)<-H
-            // 0x23	INX H	1		HL <- HL + 1
             // 0x24	INR H	1	Z, S, P, AC	H <- H+1
             // 0x27	DAA	1		special
             // 0x28	-
@@ -246,12 +357,7 @@ impl Cpu {
             // 0x2c	INR L	1	Z, S, P, AC	L <- L+1
             // 0x2f	CMA	1		A <- !A
             // 0x30	-
-            // 0x31	LXI SP, D16	3		SP.hi <- byte 3, SP.lo <- byte 2
-            0x31 => {
-                self.sp = self.next_word();
-            }
             // 0x32	STA adr	3		(adr) <- A
-            // 0x33	INX SP	1		SP = SP + 1
             // 0x34	INR M	1	Z, S, P, AC	(HL) <- (HL)+1
             // 0x37	STC	1	CY	CY = 1
             // 0x38	-
@@ -260,101 +366,53 @@ impl Cpu {
             // 0x3c	INR A	1	Z, S, P, AC	A <- A+1
             // 0x3f	CMC	1	CY	CY=!CY
             // 0x40	MOV B,B	1		B <- B
-            0x40 => {
-                self.b = self.b;
-            }
+            0x40 => self.b = self.b,
             // 0x41	MOV B,C	1		B <- C
-            0x41 => {
-                self.b = self.c;
-            }
+            0x41 => self.b = self.c,
             // 0x42	MOV B,D	1		B <- D
-            0x42 => {
-                self.b = self.d;
-            }
+            0x42 => self.b = self.d,
             // 0x43	MOV B,E	1		B <- E
-            0x43 => {
-                self.b = self.e;
-            }
+            0x43 => self.b = self.e,
             // 0x44	MOV B,H	1		B <- H
-            0x44 => {
-                self.b = self.h;
-            }
+            0x44 => self.b = self.h,
             // 0x45	MOV B,L	1		B <- L
-            0x45 => {
-                self.b = self.l;
-            }
+            0x45 => self.b = self.l,
             // 0x46	MOV B,M	1		B <- (HL)
-            0x46 => {
-                self.b = self.mem[hl];
-            }
+            0x46 => self.b = self.mem[hl],
             // 0x47	MOV B,A	1		B <- A
-            0x47 => {
-                self.b = self.a;
-            }
+            0x47 => self.b = self.a,
             // 0x48	MOV C,B	1		C <- B
-            0x48 => {
-                self.c = self.b;
-            }
+            0x48 => self.c = self.b,
             // 0x49	MOV C,C	1		C <- C
-            0x49 => {
-                self.c = self.c;
-            }
+            0x49 => self.c = self.c,
             // 0x4a	MOV C,D	1		C <- D
-            0x4A => {
-                self.c = self.d;
-            }
+            0x4A => self.c = self.d,
             // 0x4b	MOV C,E	1		C <- E
-            0x4B => {
-                self.c = self.e;
-            }
+            0x4B => self.c = self.e,
             // 0x4c	MOV C,H	1		C <- H
-            0x4C => {
-                self.c = self.h;
-            }
+            0x4C => self.c = self.h,
             // 0x4d	MOV C,L	1		C <- L
-            0x4D => {
-                self.c = self.l;
-            }
+            0x4D => self.c = self.l,
             // 0x4e	MOV C,M	1		C <- (HL)
-            0x4E => {
-                self.c = self.mem[hl];
-            }
+            0x4E => self.c = self.mem[hl],
             // 0x4f	MOV C,A	1		C <- A
-            0x4F => {
-                self.c = self.a;
-            }
+            0x4F => self.c = self.a,
             // 0x50	MOV D,B	1		D <- B
-            0x50 => {
-                self.d = self.b;
-            }
+            0x50 => self.d = self.b,
             // 0x51	MOV D,C	1		D <- C
-            0x51 => {
-                self.d = self.c;
-            }
+            0x51 => self.d = self.c,
             // 0x52	MOV D,D	1		D <- D
-            0x52 => {
-                self.d = self.d;
-            }
+            0x52 => self.d = self.d,
             // 0x53	MOV D,E	1		D <- E
-            0x53 => {
-                self.d = self.e;
-            }
+            0x53 => self.d = self.e,
             // 0x54	MOV D,H	1		D <- H
-            0x54 => {
-                self.d = self.h;
-            }
+            0x54 => self.d = self.h,
             // 0x55	MOV D,L	1		D <- L
-            0x55 => {
-                self.d = self.l;
-            }
+            0x55 => self.d = self.l,
             // 0x56	MOV D,M	1		D <- (HL)
-            0x56 => {
-                self.d = self.mem[hl];
-            }
+            0x56 => self.d = self.mem[hl],
             // 0x57	MOV D,A	1		D <- A
-            0x57 => {
-                self.d = self.a;
-            }
+            0x57 => self.d = self.a,
             // 0x58	MOV E,B	1		E <- B
             0x58 => self.e = self.b,
             // 0x59	MOV E,C	1		E <- C
@@ -644,14 +702,16 @@ impl Cpu {
             // 0xca	JZ adr	3		if Z, PC <- adr
             0xCA => {
                 if self.cc.z {
-                    self.op_jump(hl);
+                    let addr = self.next_word();
+                    self.op_jump(addr);
                 }
             }
             // 0xcb	-
             // 0xcc	CZ adr	3		if Z, CALL adr
             0xCC => {
                 if self.cc.z {
-                    self.op_call(hl);
+                    let addr = self.next_word();
+                    self.op_call(addr);
                 }
             }
             // 0xcd	CALL adr	3		(SP-1)<-PC.hi;(SP-2)<-PC.lo;SP<-SP-2;PC=adr
@@ -670,7 +730,8 @@ impl Cpu {
             // 0xd2	JNC adr	3		if NCY, PC<-adr
             0xD2 => {
                 if !self.cc.cy {
-                    self.op_jump(hl);
+                    let addr = self.next_word();
+                    self.op_jump(addr);
                 }
             }
             // 0xd3	OUT D8	2		special
@@ -678,7 +739,8 @@ impl Cpu {
             // 0xd4	CNC adr	3		if NCY, CALL adr
             0xD4 => {
                 if !self.cc.cy {
-                    self.op_call(hl);
+                    let addr = self.next_word();
+                    self.op_call(addr);
                 }
             }
             // 0xd6	SUI D8	2	Z, S, P, CY, AC	A <- A - data
@@ -688,7 +750,8 @@ impl Cpu {
             // 0xda	JC adr	3		if CY, PC<-adr
             0xDA => {
                 if self.cc.cy {
-                    self.op_jump(hl);
+                    let addr = self.next_word();
+                    self.op_jump(addr);
                 }
             }
             // 0xdb	IN D8	2		special
@@ -696,7 +759,8 @@ impl Cpu {
             // 0xdc	CC adr	3		if CY, CALL adr
             0xDC => {
                 if self.cc.cy {
-                    self.op_call(hl);
+                    let addr = self.next_word();
+                    self.op_call(addr);
                 }
             }
             // 0xdd	-
@@ -711,14 +775,16 @@ impl Cpu {
             // 0xe2	JPO adr	3		if PO, PC <- adr
             0xE2 => {
                 if self.cc.p {
-                    self.op_jump(hl);
+                    let addr = self.next_word();
+                    self.op_jump(addr);
                 }
             }
             // 0xe3	XTHL	1		L <-> (SP); H <-> (SP+1)
             // 0xe4	CPO adr	3		if PO, CALL adr
             0xE4 => {
                 if self.cc.p {
-                    self.op_call(hl);
+                    let addr = self.next_word();
+                    self.op_call(addr);
                 }
             }
             // 0xe6	ANI D8	2	Z, S, P, CY, AC	A <- A & data
@@ -733,14 +799,16 @@ impl Cpu {
             // 0xea	JPE adr	3		if PE, PC <- adr
             0xEA => {
                 if !self.cc.p {
-                    self.op_jump(hl);
+                    let addr = self.next_word();
+                    self.op_jump(addr);
                 }
             }
             // 0xeb	XCHG	1		H <-> D; L <-> E
             // 0xec	CPE adr	3		if PE, CALL adr
             0xEC => {
                 if !self.cc.p {
-                    self.op_call(hl);
+                    let addr = self.next_word();
+                    self.op_call(addr);
                 }
             }
             // 0xed	-
@@ -755,7 +823,8 @@ impl Cpu {
             // 0xf2	JP adr	3		if P=1 PC <- adr
             0xF2 => {
                 if self.cc.s {
-                    self.op_jump(hl);
+                    let addr = self.next_word();
+                    self.op_jump(addr);
                 }
             }
             // 0xf3	DI	1		special
@@ -770,7 +839,8 @@ impl Cpu {
             // 0xfa	JM adr	3		if M, PC <- adr
             0xFA => {
                 if !self.cc.s {
-                    self.op_jump(hl);
+                    let addr = self.next_word();
+                    self.op_jump(addr);
                 }
             }
             // 0xfb	EI	1		special
@@ -785,64 +855,5 @@ impl Cpu {
                 panic!("Invalid OP: {:02X}", op);
             }
         }
-    }
-
-    fn update_cc(&mut self, num: u8) {
-        self.cc.z = num == 0;
-        self.cc.s = num >> 7 == 1;
-        self.cc.p = num & 1 == 1;
-    }
-
-    fn update_cc_cy(&mut self, num: u8, cy: bool) {
-        self.update_cc(num);
-        self.cc.cy = cy;
-    }
-
-    fn op_add(&mut self, rhs: u8) {
-        let (sum, overflow) = self.a.overflowing_add(rhs);
-
-        self.a = sum;
-        self.update_cc_cy(sum, overflow);
-    }
-
-    fn op_sub(&mut self, rhs: u8) {
-        let (res, overflow) = self.a.overflowing_sub(rhs);
-
-        self.a = res;
-        self.update_cc_cy(res, overflow);
-    }
-
-    fn op_and(&mut self, rhs: u8) {
-        let res = self.a & rhs;
-        self.a = res;
-        self.update_cc_cy(res, false);
-    }
-
-    fn op_or(&mut self, rhs: u8) {
-        let res = self.a | rhs;
-        self.a = res;
-        self.update_cc_cy(res, false);
-    }
-
-    fn op_xor(&mut self, rhs: u8) {
-        let res = self.a ^ rhs;
-        self.a = res;
-        self.update_cc_cy(res, false);
-    }
-
-    fn op_jump(&mut self, addr: u16) {
-        self.pc = addr;
-    }
-
-    fn op_call(&mut self, addr: u16) {
-        self.mem[self.sp - 1] = self.pc as u8;
-        self.mem[self.sp - 2] = (self.pc >> 2) as u8;
-        self.pc = addr;
-        self.sp -= 2;
-    }
-
-    fn op_ret(&mut self) {
-        self.pc = ((self.mem[self.sp + 1] as u16) << 2) | self.mem[self.sp + 2] as u16;
-        self.sp += 2
     }
 }
