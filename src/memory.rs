@@ -1,7 +1,6 @@
 use std::{
     fs,
     ops::{Index, IndexMut},
-    process::Output,
 };
 
 pub struct Memory {

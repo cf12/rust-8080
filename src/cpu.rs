@@ -1,10 +1,10 @@
-use core::{fmt, num};
+use core::fmt;
 use std::process::exit;
 
 use crate::Memory;
 
 // TODO: use addr type
-type addr = u16;
+type Addr = u16;
 
 // TODO: use bitfield crate maybe
 pub struct CpuFlags {
@@ -54,12 +54,13 @@ impl CpuFlags {
 
 impl fmt::Display for Cpu {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[a]: {:02X}\n", self.a)?;
-        write!(f, "[bc]: {:02X}{:02X}\n", self.b, self.c)?;
-        write!(f, "[de]: {:02X}{:02X}\n", self.d, self.e)?;
+        write!(f, "[a]: {:02X} | ", self.a)?;
+        write!(f, "[bc]: {:02X}{:02X} | ", self.b, self.c)?;
+        write!(f, "[de]: {:02X}{:02X} | ", self.d, self.e)?;
         write!(f, "[hl]: {:02X}{:02X}\n", self.h, self.l)?;
-        write!(f, "[sp]: {:04X}\n", self.sp)?;
-        write!(f, "[pc]: {:04X}\n", self.pc)
+        write!(f, "[sp]: {:04X} | ", self.sp)?;
+        write!(f, "[pc]: {:04X} | ", self.pc)?;
+        write!(f, "[op]: {:02X}\n", self.mem[self.pc])
     }
 }
 
@@ -95,25 +96,32 @@ impl Cpu {
         self.mem.load_rom(path);
     }
 
+    fn next_byte(&mut self) -> u8 {
+        self.pc += 1;
+        return self.mem[self.pc - 1];
+    }
+
+    fn next_word(&mut self) -> u16 {
+        self.pc += 2;
+        // little endian
+        return ((self.mem[self.pc - 1] as u16) << 8) | (self.mem[self.pc - 2] as u16);
+    }
+
     pub fn cycle(&mut self) {
-        let op = self.mem[self.pc];
-        let op1 = self.mem[self.pc + 1];
-        let op2 = self.mem[self.pc + 2];
-        let mut num_ops = 1;
+        let op = self.next_byte();
 
         // TODO: optimize these calls to only occur in ops
         let hl = ((self.h as u16) << 8) | self.l as u16;
         let bc = ((self.b as u16) << 8) | self.c as u16;
         let de = ((self.d as u16) << 8) | self.e as u16;
-        let addr = ((op2 as u16) << 8) | op1 as u16;
 
         match op {
             // 0x00	NOP	1
             0x00 => {}
             // 0x01	LXI B,D16	3		B <- byte 3, C <- byte 2
             0x01 => {
-                self.b = op2;
-                self.c = op1;
+                self.c = self.next_byte();
+                self.b = self.next_byte();
             }
             // 0x02	STAX B	1		(BC) <- A
             // 0x03	INX B	1		BC <- BC+1
@@ -166,43 +174,35 @@ impl Cpu {
 
             // 0x06	MVI B, D8	2		B <- byte 2
             0x06 => {
-                self.b = op1;
-                num_ops = 2;
+                self.b = self.next_byte();
             }
             // 0x0e	MVI C,D8	2		C <- byte 2
             0x0E => {
-                self.c = op1;
-                num_ops = 2;
+                self.c = self.next_byte();
             }
             // 0x16	MVI D, D8	2		D <- byte 2
             0x16 => {
-                self.d = op1;
-                num_ops = 2;
+                self.d = self.next_byte();
             }
             // 0x1e	MVI E,D8	2		E <- byte 2
             0x1E => {
-                self.e = op1;
-                num_ops = 2;
+                self.e = self.next_byte();
             }
             // 0x26	MVI H,D8	2		H <- byte 2
             0x26 => {
-                self.h = op1;
-                num_ops = 2;
+                self.h = self.next_byte();
             }
             // 0x2e	MVI L, D8	2		L <- byte 2
             0x2E => {
-                self.l = op1;
-                num_ops = 2;
+                self.l = self.next_byte();
             }
             // 0x36	MVI M,D8	2		(HL) <- byte 2
             0x36 => {
-                self.mem[hl] = op1;
-                num_ops = 2;
+                self.mem[hl] = self.next_byte();
             }
             // 0x3e	MVI A,D8	2		A <- byte 2
             0x3E => {
-                self.a = op1;
-                num_ops = 2;
+                self.a = self.next_byte();
             }
 
             // 0x07	RLC	1	CY	A = A << 1; bit 0 = prev bit 7; CY = prev bit 7
@@ -248,8 +248,7 @@ impl Cpu {
             // 0x30	-
             // 0x31	LXI SP, D16	3		SP.hi <- byte 3, SP.lo <- byte 2
             0x31 => {
-                self.sp = addr;
-                num_ops = 3;
+                self.sp = self.next_word();
             }
             // 0x32	STA adr	3		(adr) <- A
             // 0x33	INX SP	1		SP = SP + 1
@@ -465,7 +464,10 @@ impl Cpu {
             // ADC L
             0x8D => self.op_add(self.l + self.cc.cy as u8),
             // ADI byte
-            0xC6 => self.op_add(op1),
+            0xC6 => {
+                let byte = self.next_byte();
+                self.op_add(byte);
+            }
             // SUB B
             0x90 => self.op_sub(self.b),
             // SUB C	1	Z, S, P, CY, AC	A <- A - C
@@ -614,24 +616,21 @@ impl Cpu {
             // 0xc2	JNZ adr	3		if NZ, PC <- adr
             0xC2 => {
                 if !self.cc.z {
+                    let addr = self.next_word();
                     self.op_jump(addr);
-                    num_ops = 0;
-                } else {
-                    num_ops = 3;
                 }
             }
             // 0xc3	JMP adr	3		PC <= adr
             0xC3 => {
+                let addr = self.next_word();
                 self.op_jump(addr);
-                num_ops = 0;
             }
             // 0xc4	CNZ adr	3		if NZ, CALL adr
             0xC4 => {
                 if !self.cc.z {
+                    let addr = self.next_word();
                     self.op_call(addr);
                 }
-
-                num_ops = 3;
             }
             // 0xc6	ADI D8	2	Z, S, P, CY, AC	A <- A + byte
             // 0xc7	RST 0	1		CALL $0
@@ -647,8 +646,6 @@ impl Cpu {
                 if self.cc.z {
                     self.op_jump(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xcb	-
             // 0xcc	CZ adr	3		if Z, CALL adr
@@ -656,13 +653,11 @@ impl Cpu {
                 if self.cc.z {
                     self.op_call(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xcd	CALL adr	3		(SP-1)<-PC.hi;(SP-2)<-PC.lo;SP<-SP-2;PC=adr
             0xCD => {
+                let addr = self.next_word();
                 self.op_call(addr);
-                num_ops = 0;
             }
             // 0xce	ACI D8	2	Z, S, P, CY, AC	A <- A + data + CY
             // 0xcf	RST 1	1		CALL $8
@@ -677,8 +672,6 @@ impl Cpu {
                 if !self.cc.cy {
                     self.op_jump(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xd3	OUT D8	2		special
             0xD3 => {}
@@ -687,8 +680,6 @@ impl Cpu {
                 if !self.cc.cy {
                     self.op_call(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xd6	SUI D8	2	Z, S, P, CY, AC	A <- A - data
             // 0xd7	RST 2	1		CALL $10
@@ -699,8 +690,6 @@ impl Cpu {
                 if self.cc.cy {
                     self.op_jump(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xdb	IN D8	2		special
             0xDB => {}
@@ -709,8 +698,6 @@ impl Cpu {
                 if self.cc.cy {
                     self.op_call(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xdd	-
             // 0xde	SBI D8	2	Z, S, P, CY, AC	A <- A - data - CY
@@ -726,8 +713,6 @@ impl Cpu {
                 if self.cc.p {
                     self.op_jump(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xe3	XTHL	1		L <-> (SP); H <-> (SP+1)
             // 0xe4	CPO adr	3		if PO, CALL adr
@@ -735,8 +720,6 @@ impl Cpu {
                 if self.cc.p {
                     self.op_call(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xe6	ANI D8	2	Z, S, P, CY, AC	A <- A & data
             // 0xe7	RST 4	1		CALL $20
@@ -752,8 +735,6 @@ impl Cpu {
                 if !self.cc.p {
                     self.op_jump(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xeb	XCHG	1		H <-> D; L <-> E
             // 0xec	CPE adr	3		if PE, CALL adr
@@ -761,8 +742,6 @@ impl Cpu {
                 if !self.cc.p {
                     self.op_call(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xed	-
             // 0xee	XRI D8	2	Z, S, P, CY, AC	A <- A ^ data
@@ -778,8 +757,6 @@ impl Cpu {
                 if self.cc.s {
                     self.op_jump(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xf3	DI	1		special
             0xF3 => {
@@ -795,8 +772,6 @@ impl Cpu {
                 if !self.cc.s {
                     self.op_jump(hl);
                 }
-
-                num_ops = 3;
             }
             // 0xfb	EI	1		special
             0xFB => {
@@ -810,8 +785,6 @@ impl Cpu {
                 panic!("Invalid OP: {:02X}", op);
             }
         }
-
-        self.pc += num_ops;
     }
 
     fn update_cc(&mut self, num: u8) {
