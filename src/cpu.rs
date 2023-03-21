@@ -50,6 +50,29 @@ impl CpuFlags {
         self.cy = (num & 0b1000) == 0b1000;
         self.ac = (num & 0b10000) == 0b10000;
     }
+
+    fn set_szapc(&mut self, num: u8, cy: bool) {
+        self.set_szap(num);
+        self.set_c(cy);
+    }
+
+    fn set_szap(&mut self, mut num: u8) {
+        self.z = num == 0;
+        self.s = num >> 7 == 1;
+        self.ac = false;
+
+        let mut par = 0;
+        while num != 0 {
+            par ^= num & 1;
+            num >>= 1;
+        }
+
+        self.p = par != 0;
+    }
+
+    fn set_c(&mut self, cy: bool) {
+        self.cy = cy;
+    }
 }
 
 impl fmt::Display for Cpu {
@@ -75,7 +98,7 @@ impl Cpu {
             h: 0,
             l: 0,
 
-            sp: 0,
+            sp: 0xf000,
             pc: 0,
 
             mem: Memory::new(),
@@ -134,47 +157,41 @@ impl Cpu {
         return ((self.d as u16) << 8) | self.e as u16;
     }
 
-    fn update_cc(&mut self, num: u8) {
-        self.cc.z = num == 0;
-        self.cc.s = num >> 7 == 1;
-        self.cc.p = num & 1 == 1;
-    }
-
-    fn update_cc_cy(&mut self, num: u8, cy: bool) {
-        self.update_cc(num);
-        self.cc.cy = cy;
-    }
-
     fn op_add(&mut self, rhs: u8) {
-        let (sum, overflow) = self.a.overflowing_add(rhs);
+        let (sum, cy) = self.a.overflowing_add(rhs);
 
         self.a = sum;
-        self.update_cc_cy(sum, overflow);
+        self.cc.set_szapc(sum, cy);
     }
 
     fn op_sub(&mut self, rhs: u8) {
-        let (res, overflow) = self.a.overflowing_sub(rhs);
+        let (res, cy) = self.a.overflowing_sub(rhs);
 
         self.a = res;
-        self.update_cc_cy(res, overflow);
+        self.cc.set_szapc(res, cy);
     }
 
     fn op_and(&mut self, rhs: u8) {
         let res = self.a & rhs;
         self.a = res;
-        self.update_cc_cy(res, false);
+        self.cc.set_szapc(res, false);
     }
 
     fn op_or(&mut self, rhs: u8) {
         let res = self.a | rhs;
         self.a = res;
-        self.update_cc_cy(res, false);
+        self.cc.set_szapc(res, false);
     }
 
     fn op_xor(&mut self, rhs: u8) {
         let res = self.a ^ rhs;
         self.a = res;
-        self.update_cc_cy(res, false);
+        self.cc.set_szapc(res, false);
+    }
+
+    fn op_cmp(&mut self, rhs: u8) {
+        let (res, cy) = self.a.overflowing_sub(rhs);
+        self.cc.set_szapc(res, cy);
     }
 
     fn op_jump(&mut self, addr: u16) {
@@ -226,6 +243,8 @@ impl Cpu {
             }
 
             // 0x02	STAX B	1		(BC) <- A
+            0x02 => {}
+            // 0x12	STAX D	1		(DE) <- A
 
             // 0x03	INX B	1		BC <- BC + 1
             0x03 => self.set_bc(bc + 1),
@@ -238,50 +257,84 @@ impl Cpu {
 
             // 0x04	INR B	1	Z, S, P, AC	B <- B+1
             0x04 => {
-                self.b += 1;
-                self.update_cc(self.b);
+                self.b = self.b.wrapping_add(1);
+                self.cc.set_szap(self.b);
+            }
+            // 0x0c	INR C	1	Z, S, P, AC	C <- C+1
+            0x0C => {
+                self.c = self.c.wrapping_add(1);
+                self.cc.set_szap(self.c);
+            }
+            // 0x14	INR D	1	Z, S, P, AC	D <- D+1
+            0x14 => {
+                self.d = self.d.wrapping_add(1);
+                self.cc.set_szap(self.d);
+            }
+            // 0x1c	INR E	1	Z, S, P, AC	E <-E+1
+            0x1C => {
+                self.e = self.e.wrapping_add(1);
+                self.cc.set_szap(self.e);
+            }
+            // 0x24	INR H	1	Z, S, P, AC	H <- H+1
+            0x24 => {
+                self.h = self.h.wrapping_add(1);
+                self.cc.set_szap(self.h);
+            }
+            // 0x2c	INR L	1	Z, S, P, AC	L <- L+1
+            0x2C => {
+                self.l = self.l.wrapping_add(1);
+                self.cc.set_szap(self.l);
+            }
+            // 0x34	INR M	1	Z, S, P, AC	(HL) <- (HL)+1
+            0x34 => {
+                self.mem[hl] = self.mem[hl].wrapping_add(1);
+                self.cc.set_szap(self.mem[hl]);
+            }
+            // 0x3c	INR A	1	Z, S, P, AC	A <- A+1
+            0x3C => {
+                self.a = self.a.wrapping_add(1);
+                self.cc.set_szap(self.a);
             }
 
             // 0x05	DCR B	1	Z, S, P, AC	B <- B-1
             0x05 => {
-                // TODO: this doesn't update ac
                 self.b = self.b.wrapping_sub(1);
-                self.update_cc(self.b);
+                self.cc.set_szap(self.b);
             }
             // 0x0d	DCR C	1	Z, S, P, AC	C <-C-1
             0x0D => {
-                self.c -= 1;
-                self.update_cc(self.c);
+                self.c = self.c.wrapping_sub(1);
+                self.cc.set_szap(self.c);
             }
             // 0x15	DCR D	1	Z, S, P, AC	D <- D-1
             0x15 => {
-                self.d -= 1;
-                self.update_cc(self.d)
+                self.d = self.d.wrapping_sub(1);
+                self.cc.set_szap(self.d)
             }
             // 0x1d	DCR E	1	Z, S, P, AC	E <- E-1
             0x1D => {
-                self.e -= 1;
-                self.update_cc(self.e)
+                self.e = self.e.wrapping_sub(1);
+                self.cc.set_szap(self.e)
             }
             // 0x25	DCR H	1	Z, S, P, AC	H <- H-1
             0x25 => {
-                self.h -= 1;
-                self.update_cc(self.h)
+                self.h = self.h.wrapping_sub(1);
+                self.cc.set_szap(self.h)
             }
             // 0x2d	DCR L	1	Z, S, P, AC	L <- L-1
             0x2D => {
-                self.l -= 1;
-                self.update_cc(self.l)
+                self.l = self.l.wrapping_sub(1);
+                self.cc.set_szap(self.l)
             }
             // 0x35	DCR M	1	Z, S, P, AC	(HL) <- (HL)-1
             0x35 => {
-                self.mem[hl] -= 1;
-                self.update_cc(self.mem[hl])
+                self.mem[hl] = self.mem[hl].wrapping_sub(1);
+                self.cc.set_szap(self.mem[hl])
             }
             // 0x3d	DCR A	1	Z, S, P, AC	A <- A-1
             0x3D => {
-                self.a -= 1;
-                self.update_cc(self.a);
+                self.a = self.a.wrapping_sub(1);
+                self.cc.set_szap(self.a);
             }
 
             // 0x06	MVI B, D8	2		B <- byte 2
@@ -319,16 +372,32 @@ impl Cpu {
 
             // 0x07	RLC	1	CY	A = A << 1; bit 0 = prev bit 7; CY = prev bit 7
             // 0x08	-
+            0x08 => {}
 
             // 0x09	DAD B	1	CY	HL = HL + BC
             0x09 => {
                 let (res, cy) = hl.overflowing_add(bc);
                 self.set_hl(res);
-                self.cc.cy = cy;
+                self.cc.set_c(cy);
             }
             // 0x19	DAD D	1	CY	HL = HL + DE
+            0x19 => {
+                let (res, cy) = hl.overflowing_add(de);
+                self.set_hl(res);
+                self.cc.set_c(cy);
+            }
             // 0x29	DAD H	1	CY	HL = HL + HI
+            0x29 => {
+                let (res, cy) = hl.overflowing_add(hl);
+                self.set_hl(res);
+                self.cc.set_c(cy);
+            }
             // 0x39	DAD SP	1	CY	HL = HL + SP
+            0x39 => {
+                let (res, cy) = hl.overflowing_add(self.sp);
+                self.set_hl(res);
+                self.cc.set_c(cy);
+            }
 
             // 0x0a	LDAX B	1		A <- (BC)
             0x0A => self.a = self.mem[bc],
@@ -336,35 +405,30 @@ impl Cpu {
             0x1A => self.a = self.mem[de],
 
             // 0x0b	DCX B	1		BC = BC-1
-            // 0x0c	INR C	1	Z, S, P, AC	C <- C+1
             // 0x0f	RRC	1	CY	A = A >> 1; bit 7 = prev bit 0; CY = prev bit 0
             // 0x10	-
 
-            // 0x12	STAX D	1		(DE) <- A
-            // 0x14	INR D	1	Z, S, P, AC	D <- D+1
             // 0x17	RAL	1	CY	A = A << 1; bit 0 = prev CY; CY = prev bit 7
             // 0x18	-
             // 0x1b	DCX D	1		DE = DE-1
-            // 0x1c	INR E	1	Z, S, P, AC	E <-E+1
             // 0x1f	RAR	1	CY	A = A >> 1; bit 7 = prev bit 7; CY = prev bit 0
             // 0x20	-
             // 0x22	SHLD adr	3		(adr) <-L; (adr+1)<-H
-            // 0x24	INR H	1	Z, S, P, AC	H <- H+1
             // 0x27	DAA	1		special
             // 0x28	-
             // 0x2a	LHLD adr	3		L <- (adr); H<-(adr+1)
             // 0x2b	DCX H	1		HL = HL-1
-            // 0x2c	INR L	1	Z, S, P, AC	L <- L+1
             // 0x2f	CMA	1		A <- !A
             // 0x30	-
             // 0x32	STA adr	3		(adr) <- A
-            // 0x34	INR M	1	Z, S, P, AC	(HL) <- (HL)+1
             // 0x37	STC	1	CY	CY = 1
             // 0x38	-
             // 0x3a	LDA adr	3		A <- (adr)
             // 0x3b	DCX SP	1		SP = SP-1
-            // 0x3c	INR A	1	Z, S, P, AC	A <- A+1
+
             // 0x3f	CMC	1	CY	CY=!CY
+            0x3f => self.cc.set_c(!self.cc.cy),
+
             // 0x40	MOV B,B	1		B <- B
             0x40 => self.b = self.b,
             // 0x41	MOV B,C	1		B <- C
@@ -526,22 +590,25 @@ impl Cpu {
                 let byte = self.next_byte();
                 self.op_add(byte);
             }
+
             // SUB B
+            // 0x90 SUB B	1	Z, S, P, CY, AC	A <- A - B
             0x90 => self.op_sub(self.b),
-            // SUB C	1	Z, S, P, CY, AC	A <- A - C
+            // 0x91 SUB C	1	Z, S, P, CY, AC	A <- A - C
             0x91 => self.op_sub(self.c),
-            // 0x92	SUB D	1	Z, S, P, CY, AC	A <- A + D
+            // 0x92	SUB D	1	Z, S, P, CY, AC	A <- A - D
             0x92 => self.op_sub(self.d),
             // 0x93	SUB E	1	Z, S, P, CY, AC	A <- A - E
             0x93 => self.op_sub(self.e),
-            // 0x94	SUB H	1	Z, S, P, CY, AC	A <- A + H
+            // 0x94	SUB H	1	Z, S, P, CY, AC	A <- A - H
             0x94 => self.op_sub(self.h),
             // 0x95	SUB L	1	Z, S, P, CY, AC	A <- A - L
             0x95 => self.op_sub(self.l),
-            // 0x96	SUB M	1	Z, S, P, CY, AC	A <- A + (HL)
+            // 0x96	SUB M	1	Z, S, P, CY, AC	A <- A - (HL)
             0x96 => self.op_sub(self.mem[hl]),
             // 0x97	SUB A	1	Z, S, P, CY, AC	A <- A - A
             0x97 => self.op_sub(self.a),
+
             // 0x98	SBB B	1	Z, S, P, CY, AC	A <- A - B - CY
             0x98 => self.op_sub(self.b - self.cc.cy as u8),
             // 0x99	SBB C	1	Z, S, P, CY, AC	A <- A - C - CY
@@ -558,6 +625,7 @@ impl Cpu {
             0x9E => self.op_sub(self.mem[hl] - self.cc.cy as u8),
             // 0x9f	SBB A	1	Z, S, P, CY, AC	A <- A - A - CY
             0x9F => self.op_sub(self.a - self.cc.cy as u8),
+
             // 0xa0	ANA B	1	Z, S, P, CY, AC	A <- A & B
             0xA0 => self.op_and(self.b),
             // 0xa1	ANA C	1	Z, S, P, CY, AC	A <- A & C
@@ -574,6 +642,7 @@ impl Cpu {
             0xA6 => self.op_and(self.mem[hl]),
             // 0xa7	ANA A	1	Z, S, P, CY, AC	A <- A & A
             0xA7 => self.op_and(self.a),
+
             // 0xa8	XRA B	1	Z, S, P, CY, AC	A <- A ^ B
             0xA8 => self.op_xor(self.b),
             // 0xa9	XRA C	1	Z, S, P, CY, AC	A <- A ^ C
@@ -590,6 +659,7 @@ impl Cpu {
             0xAE => self.op_xor(self.mem[hl]),
             // 0xaf	XRA A	1	Z, S, P, CY, AC	A <- A ^ A
             0xAF => self.op_xor(self.a),
+
             // 0xb0	ORA B	1	Z, S, P, CY, AC	A <- A | B
             0xB0 => self.op_or(self.b),
             // 0xb1	ORA C	1	Z, S, P, CY, AC	A <- A | C
@@ -606,14 +676,24 @@ impl Cpu {
             0xB6 => self.op_or(self.mem[hl]),
             // 0xb7	ORA A	1	Z, S, P, CY, AC	A <- A | A
             0xB7 => self.op_or(self.a),
+
             // 0xb8	CMP B	1	Z, S, P, CY, AC	A - B
+            0xB8 => self.op_cmp(self.b),
             // 0xb9	CMP C	1	Z, S, P, CY, AC	A - C
+            0xB9 => self.op_cmp(self.c),
             // 0xba	CMP D	1	Z, S, P, CY, AC	A - D
+            0xBA => self.op_cmp(self.d),
             // 0xbb	CMP E	1	Z, S, P, CY, AC	A - E
+            0xBB => self.op_cmp(self.e),
             // 0xbc	CMP H	1	Z, S, P, CY, AC	A - H
+            0xBC => self.op_cmp(self.h),
             // 0xbd	CMP L	1	Z, S, P, CY, AC	A - L
+            0xBD => self.op_cmp(self.l),
             // 0xbe	CMP M	1	Z, S, P, CY, AC	A - (HL)
+            0xBE => self.op_cmp(self.mem[hl]),
             // 0xbf	CMP A	1	Z, S, P, CY, AC	A - A
+            0xBF => self.op_cmp(self.a),
+
             // 0xc0	RNZ	1		if NZ, RET
             0xC0 => {
                 if !self.cc.z {
