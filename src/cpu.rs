@@ -1,7 +1,5 @@
 use core::fmt;
-use std::process::exit;
-
-use crate::Memory;
+use std::{process::exit, fs};
 
 // TODO: use addr type
 type Addr = u16;
@@ -28,11 +26,15 @@ pub struct Cpu {
     sp: u16,
     pc: u16,
 
-    mem: Memory,
+    mem: Vec<u8>,
     cc: CpuFlags,
 
     inte: bool,
 }
+
+pub const VIDEO_START: usize = 0x2400;
+pub const VIDEO_END: usize = 0x4000;
+pub const MEMORY_SIZE: usize = 0x10000;
 
 impl CpuFlags {
     fn encode_u8(&self) -> u8 {
@@ -83,7 +85,7 @@ impl fmt::Display for Cpu {
         write!(f, "[hl]: {:02X}{:02X}\n", self.h, self.l)?;
         write!(f, "[pc]: {:04X} | ", self.pc)?;
         write!(f, "[sp]: {:04X} | ", self.sp)?;
-        write!(f, "[op]: {:02X}\n", self.mem[self.pc])
+        write!(f, "[op]: {:02X}\n", self.mem[self.pc as usize])
     }
 }
 
@@ -101,7 +103,7 @@ impl Cpu {
             sp: 0xf000,
             pc: 0,
 
-            mem: Memory::new(),
+            mem: vec![0; MEMORY_SIZE],
             cc: CpuFlags {
                 z: false,
                 s: false,
@@ -116,18 +118,19 @@ impl Cpu {
     }
 
     pub fn load_rom(&mut self, path: &String) {
-        self.mem.load_rom(path);
+        let rom = fs::read(path).expect("Cannot read ROM file");
+        self.mem[..rom.len()].copy_from_slice(&rom);
     }
 
     fn next_byte(&mut self) -> u8 {
         self.pc += 1;
-        return self.mem[self.pc - 1];
+        return self.mem[(self.pc - 1) as usize];
     }
 
     fn next_word(&mut self) -> u16 {
         self.pc += 2;
         // little endian
-        return ((self.mem[self.pc - 1] as u16) << 8) | (self.mem[self.pc - 2] as u16);
+        return ((self.mem[(self.pc - 1) as usize] as u16) << 8) | (self.mem[(self.pc - 2) as usize] as u16);
     }
 
     fn set_hl(&mut self, hl: u16) {
@@ -199,15 +202,19 @@ impl Cpu {
     }
 
     fn op_call(&mut self, addr: u16) {
-        self.mem[self.sp - 1] = self.pc as u8;
-        self.mem[self.sp - 2] = (self.pc >> 2) as u8;
+        self.mem[(self.sp - 1) as usize] = self.pc as u8;
+        self.mem[(self.sp - 2) as usize] = (self.pc >> 2) as u8;
         self.pc = addr;
         self.sp -= 2;
     }
 
     fn op_ret(&mut self) {
-        self.pc = ((self.mem[self.sp + 1] as u16) << 2) | self.mem[self.sp + 2] as u16;
+        self.pc = ((self.mem[(self.sp + 1) as usize] as u16) << 2) | self.mem[(self.sp + 2) as usize] as u16;
         self.sp += 2
+    }
+
+    pub fn get_video(self) -> Vec<u8> {
+        return self.mem[VIDEO_START..VIDEO_END].to_vec();
     }
 
     pub fn cycle(&mut self) {
@@ -245,6 +252,7 @@ impl Cpu {
             // 0x02	STAX B	1		(BC) <- A
             0x02 => {}
             // 0x12	STAX D	1		(DE) <- A
+            0x12 => {}
 
             // 0x03	INX B	1		BC <- BC + 1
             0x03 => self.set_bc(bc + 1),
@@ -287,8 +295,8 @@ impl Cpu {
             }
             // 0x34	INR M	1	Z, S, P, AC	(HL) <- (HL)+1
             0x34 => {
-                self.mem[hl] = self.mem[hl].wrapping_add(1);
-                self.cc.set_szap(self.mem[hl]);
+                self.mem[hl as usize] = self.mem[hl as usize].wrapping_add(1);
+                self.cc.set_szap(self.mem[hl as usize]);
             }
             // 0x3c	INR A	1	Z, S, P, AC	A <- A+1
             0x3C => {
@@ -328,8 +336,8 @@ impl Cpu {
             }
             // 0x35	DCR M	1	Z, S, P, AC	(HL) <- (HL)-1
             0x35 => {
-                self.mem[hl] = self.mem[hl].wrapping_sub(1);
-                self.cc.set_szap(self.mem[hl])
+                self.mem[hl as usize] = self.mem[hl as usize].wrapping_sub(1);
+                self.cc.set_szap(self.mem[hl as usize])
             }
             // 0x3d	DCR A	1	Z, S, P, AC	A <- A-1
             0x3D => {
@@ -363,7 +371,7 @@ impl Cpu {
             }
             // 0x36	MVI M,D8	2		(HL) <- byte 2
             0x36 => {
-                self.mem[hl] = self.next_byte();
+                self.mem[hl as usize] = self.next_byte();
             }
             // 0x3e	MVI A,D8	2		A <- byte 2
             0x3E => {
@@ -400,9 +408,9 @@ impl Cpu {
             }
 
             // 0x0a	LDAX B	1		A <- (BC)
-            0x0A => self.a = self.mem[bc],
+            0x0A => self.a = self.mem[bc as usize],
             // 0x1a	LDAX D	1		A <- (DE)
-            0x1A => self.a = self.mem[de],
+            0x1A => self.a = self.mem[de as usize],
 
             // 0x0b	DCX B	1		BC = BC-1
             // 0x0f	RRC	1	CY	A = A >> 1; bit 7 = prev bit 0; CY = prev bit 0
@@ -442,7 +450,7 @@ impl Cpu {
             // 0x45	MOV B,L	1		B <- L
             0x45 => self.b = self.l,
             // 0x46	MOV B,M	1		B <- (HL)
-            0x46 => self.b = self.mem[hl],
+            0x46 => self.b = self.mem[hl as usize],
             // 0x47	MOV B,A	1		B <- A
             0x47 => self.b = self.a,
             // 0x48	MOV C,B	1		C <- B
@@ -458,7 +466,7 @@ impl Cpu {
             // 0x4d	MOV C,L	1		C <- L
             0x4D => self.c = self.l,
             // 0x4e	MOV C,M	1		C <- (HL)
-            0x4E => self.c = self.mem[hl],
+            0x4E => self.c = self.mem[hl as usize],
             // 0x4f	MOV C,A	1		C <- A
             0x4F => self.c = self.a,
             // 0x50	MOV D,B	1		D <- B
@@ -474,7 +482,7 @@ impl Cpu {
             // 0x55	MOV D,L	1		D <- L
             0x55 => self.d = self.l,
             // 0x56	MOV D,M	1		D <- (HL)
-            0x56 => self.d = self.mem[hl],
+            0x56 => self.d = self.mem[hl as usize],
             // 0x57	MOV D,A	1		D <- A
             0x57 => self.d = self.a,
             // 0x58	MOV E,B	1		E <- B
@@ -490,7 +498,7 @@ impl Cpu {
             // 0x5d	MOV E,L	1		E <- L
             0x5D => self.e = self.l,
             // 0x5e	MOV E,M	1		E <- (HL)
-            0x5E => self.e = self.mem[hl],
+            0x5E => self.e = self.mem[hl as usize],
             // 0x5f	MOV E,A	1		E <- A
             0x5F => self.e = self.a,
             // 0x60	MOV H,B	1		H <- B
@@ -506,7 +514,7 @@ impl Cpu {
             // 0x65	MOV H,L	1		H <- L
             0x65 => self.h = self.l,
             // 0x66	MOV H,M	1		H <- (HL)
-            0x66 => self.h = self.mem[hl],
+            0x66 => self.h = self.mem[hl as usize],
             // 0x67	MOV H,A	1		H <- A
             0x67 => self.h = self.a,
             // 0x68	MOV L,B	1		L <- B
@@ -522,25 +530,25 @@ impl Cpu {
             // 0x6d	MOV L,L	1		L <- L
             0x6D => self.l = self.l,
             // 0x6e	MOV L,M	1		L <- (HL)
-            0x6E => self.l = self.mem[hl],
+            0x6E => self.l = self.mem[hl as usize],
             // 0x6f	MOV L,A	1		L <- A
             0x6F => self.l = self.a,
             // 0x70	MOV M,B	1		(HL) <- B
-            0x70 => self.mem[hl] = self.b,
+            0x70 => self.mem[hl as usize] = self.b,
             // 0x71	MOV M,C	1		(HL) <- C
-            0x71 => self.mem[hl] = self.c,
+            0x71 => self.mem[hl as usize] = self.c,
             // 0x72	MOV M,D	1		(HL) <- D
-            0x72 => self.mem[hl] = self.d,
+            0x72 => self.mem[hl as usize] = self.d,
             // 0x73	MOV M,E	1		(HL) <- E
-            0x73 => self.mem[hl] = self.e,
+            0x73 => self.mem[hl as usize] = self.e,
             // 0x74	MOV M,H	1		(HL) <- H
-            0x74 => self.mem[hl] = self.h,
+            0x74 => self.mem[hl as usize] = self.h,
             // 0x75	MOV M,L	1		(HL) <- L
-            0x75 => self.mem[hl] = self.l,
+            0x75 => self.mem[hl as usize] = self.l,
             // 0x76	HLT	1		special
             0x76 => exit(0),
             // 0x77	MOV M,A	1		(HL) <- A
-            0x77 => self.mem[hl] = self.a,
+            0x77 => self.mem[hl as usize] = self.a,
             // 0x78	MOV A,B	1		A <- B
             0x78 => self.a = self.b,
             // 0x79	MOV A,C	1		A <- C
@@ -554,7 +562,7 @@ impl Cpu {
             // 0x7d	MOV A,L	1		A <- L
             0x7D => self.a = self.l,
             // 0x7e	MOV A,M	1		A <- (HL)
-            0x7E => self.a = self.mem[hl],
+            0x7E => self.a = self.mem[hl as usize],
             // 0x7f	MOV A,A	1		A <- A
             0x7F => self.a = self.a,
             // ADD B
@@ -570,7 +578,7 @@ impl Cpu {
             // ADD L
             0x85 => self.op_add(self.l),
             // ADD M
-            0x86 => self.op_add(self.mem[hl]),
+            0x86 => self.op_add(self.mem[hl as usize]),
             // ADD A
             0x87 => self.op_add(self.a),
             // ADC B
@@ -605,7 +613,7 @@ impl Cpu {
             // 0x95	SUB L	1	Z, S, P, CY, AC	A <- A - L
             0x95 => self.op_sub(self.l),
             // 0x96	SUB M	1	Z, S, P, CY, AC	A <- A - (HL)
-            0x96 => self.op_sub(self.mem[hl]),
+            0x96 => self.op_sub(self.mem[hl as usize]),
             // 0x97	SUB A	1	Z, S, P, CY, AC	A <- A - A
             0x97 => self.op_sub(self.a),
 
@@ -622,7 +630,7 @@ impl Cpu {
             // 0x9d	SBB L	1	Z, S, P, CY, AC	A <- A - L - CY
             0x9D => self.op_sub(self.l - self.cc.cy as u8),
             // 0x9e	SBB M	1	Z, S, P, CY, AC	A <- A - (HL) - CY
-            0x9E => self.op_sub(self.mem[hl] - self.cc.cy as u8),
+            0x9E => self.op_sub(self.mem[hl as usize] - self.cc.cy as u8),
             // 0x9f	SBB A	1	Z, S, P, CY, AC	A <- A - A - CY
             0x9F => self.op_sub(self.a - self.cc.cy as u8),
 
@@ -639,7 +647,7 @@ impl Cpu {
             // 0xa5	ANA L	1	Z, S, P, CY, AC	A <- A & L
             0xA5 => self.op_and(self.l),
             // 0xa6	ANA M	1	Z, S, P, CY, AC	A <- A & (HL)
-            0xA6 => self.op_and(self.mem[hl]),
+            0xA6 => self.op_and(self.mem[hl as usize]),
             // 0xa7	ANA A	1	Z, S, P, CY, AC	A <- A & A
             0xA7 => self.op_and(self.a),
 
@@ -656,7 +664,7 @@ impl Cpu {
             // 0xad	XRA L	1	Z, S, P, CY, AC	A <- A ^ L
             0xAD => self.op_xor(self.l),
             // 0xae	XRA M	1	Z, S, P, CY, AC	A <- A ^ (HL)
-            0xAE => self.op_xor(self.mem[hl]),
+            0xAE => self.op_xor(self.mem[hl as usize]),
             // 0xaf	XRA A	1	Z, S, P, CY, AC	A <- A ^ A
             0xAF => self.op_xor(self.a),
 
@@ -673,7 +681,7 @@ impl Cpu {
             // 0xb5	ORA L	1	Z, S, P, CY, AC	A <- A | L
             0xB5 => self.op_or(self.l),
             // 0xb6	ORA M	1	Z, S, P, CY, AC	A <- A | (HL)
-            0xB6 => self.op_or(self.mem[hl]),
+            0xB6 => self.op_or(self.mem[hl as usize]),
             // 0xb7	ORA A	1	Z, S, P, CY, AC	A <- A | A
             0xB7 => self.op_or(self.a),
 
@@ -690,7 +698,7 @@ impl Cpu {
             // 0xbd	CMP L	1	Z, S, P, CY, AC	A - L
             0xBD => self.op_cmp(self.l),
             // 0xbe	CMP M	1	Z, S, P, CY, AC	A - (HL)
-            0xBE => self.op_cmp(self.mem[hl]),
+            0xBE => self.op_cmp(self.mem[hl as usize]),
             // 0xbf	CMP A	1	Z, S, P, CY, AC	A - A
             0xBF => self.op_cmp(self.a),
 
@@ -703,51 +711,51 @@ impl Cpu {
 
             // 0xc1	POP B	1		C <- (sp); B <- (sp+1); sp <- sp+2
             0xC1 => {
-                self.c = self.mem[self.sp];
-                self.b = self.mem[self.sp + 1];
+                self.c = self.mem[(self.sp) as usize];
+                self.b = self.mem[(self.sp + 1) as usize];
                 self.sp += 2;
             }
             // 0xd1	POP D	1		E <- (sp); D <- (sp+1); sp <- sp+2
             0xD1 => {
-                self.e = self.mem[self.sp];
-                self.d = self.mem[self.sp + 1];
+                self.e = self.mem[(self.sp) as usize];
+                self.d = self.mem[(self.sp + 1) as usize];
                 self.sp += 2;
             }
             // 0xe1	POP H	1		L <- (sp); H <- (sp+1); sp <- sp+2
             0xE1 => {
-                self.l = self.mem[self.sp];
-                self.h = self.mem[self.sp + 1];
+                self.l = self.mem[(self.sp) as usize];
+                self.h = self.mem[(self.sp + 1) as usize];
                 self.sp += 2;
             }
             // 0xf1	POP PSW	1		flags <- (sp); A <- (sp+1); sp <- sp+2
             0xF1 => {
-                self.cc.decode_u8(self.mem[self.sp]);
-                self.a = self.mem[self.sp + 1];
+                self.cc.decode_u8(self.mem[(self.sp) as usize]);
+                self.a = self.mem[(self.sp + 1) as usize];
                 self.sp += 2;
             }
 
             // 0xc5	PUSH B	1		(sp-2)<-C; (sp-1)<-B; sp <- sp - 2
             0xC5 => {
-                self.mem[self.sp - 1] = self.b;
-                self.mem[self.sp - 2] = self.c;
+                self.mem[(self.sp - 1) as usize] = self.b;
+                self.mem[(self.sp - 2) as usize] = self.c;
                 self.sp -= 2;
             }
             // 0xd5	PUSH D	1		(sp-2)<-E; (sp-1)<-D; sp <- sp - 2
             0xD5 => {
-                self.mem[self.sp - 1] = self.d;
-                self.mem[self.sp - 2] = self.e;
+                self.mem[(self.sp - 1) as usize] = self.d;
+                self.mem[(self.sp - 2) as usize] = self.e;
                 self.sp -= 2;
             }
             // 0xe5	PUSH H	1		(sp-2)<-L; (sp-1)<-H; sp <- sp - 2
             0xE5 => {
-                self.mem[self.sp - 1] = self.h;
-                self.mem[self.sp - 2] = self.l;
+                self.mem[(self.sp - 1) as usize] = self.h;
+                self.mem[(self.sp - 2) as usize] = self.l;
                 self.sp -= 2;
             }
             // 0xf5	PUSH PSW	1		(sp-2)<-flags; (sp-1)<-A; sp <- sp - 2
             0xF5 => {
-                self.mem[self.sp - 1] = self.a;
-                self.mem[self.sp - 2] = self.cc.encode_u8();
+                self.mem[(self.sp - 1) as usize] = self.a;
+                self.mem[(self.sp - 2) as usize] = self.cc.encode_u8();
                 self.sp -= 2;
             }
 

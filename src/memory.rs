@@ -3,9 +3,13 @@ use std::{
     ops::{Index, IndexMut},
 };
 
+pub const VIDEO_START: usize = 0x2400;
+pub const VIDEO_END: usize = 0x4000;
+
 pub struct Memory {
     pub ram: Vec<u8>,
 }
+
 
 impl Index<u16> for Memory {
     type Output = u8;
@@ -31,6 +35,14 @@ impl Memory {
     pub fn load_rom(&mut self, path: &String) {
         let rom = fs::read(path).expect("Cannot read ROM file");
         self.ram[..rom.len()].copy_from_slice(&rom);
+    }
+
+    pub fn get_video(&self) {
+        self.ram[VIDEO_START..VIDEO_END];
+    }
+
+    pub fn ram(&self) {
+        self.ram;
     }
 
     pub fn disas(self) {
