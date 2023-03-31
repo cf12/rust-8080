@@ -1,13 +1,11 @@
-mod memory;
 mod cpu;
 mod sdlgui;
-
-use std::io::stdin;
+mod test;
 
 use clap::Parser;
-use memory::Memory;
 use cpu::Cpu;
 use sdlgui::SDLGui;
+use test::Test;
 
 /// 8080 Emulator in Rust
 #[derive(Parser, Debug)]
@@ -26,9 +24,12 @@ pub fn main() {
     let args = Args::parse();
     let rng = rand::random::<u8>;
 
-    let mut cpu = Cpu::new();
+    let mut cpu = Cpu::new(|_| 0, |_, _|);
     cpu.load_rom(&args.rom_file);
 
-    let mut gui = SDLGui::new(cpu, args.scale);
-    gui.run();
+    // let mut gui = SDLGui::new(cpu, args.scale);
+    // gui.run();
+
+    let mut test = Test::new();
+    test.run();
 }

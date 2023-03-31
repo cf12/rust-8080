@@ -15,21 +15,24 @@ pub struct CpuFlags {
 }
 
 pub struct Cpu {
-    a: u8,
-    b: u8,
-    c: u8,
-    d: u8,
-    e: u8,
-    h: u8,
-    l: u8,
+    pub a: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+    pub e: u8,
+    pub h: u8,
+    pub l: u8,
 
-    sp: u16,
-    pc: u16,
+    pub sp: u16,
+    pub pc: u16,
 
-    mem: Vec<u8>,
-    cc: CpuFlags,
+    pub mem: Vec<u8>,
+    pub cc: CpuFlags,
 
-    inte: bool,
+    pub inte: bool,
+
+    port_in: fn(u8) -> u8,
+    port_out: fn(u8, u8),
 }
 
 pub const VIDEO_START: usize = 0x2400;
@@ -90,7 +93,7 @@ impl fmt::Display for Cpu {
 }
 
 impl Cpu {
-    pub fn new() -> Cpu {
+    pub fn new(port_in: fn(u8) -> u8, port_out: fn(u8, u8)) -> Cpu {
         Cpu {
             a: 0,
             b: 0,
@@ -114,6 +117,9 @@ impl Cpu {
             },
 
             inte: false,
+
+            port_in,
+            port_out,
         }
     }
 
@@ -149,15 +155,15 @@ impl Cpu {
         self.e = (de & 0xFF) as u8
     }
 
-    fn hl(&self) -> u16 {
+    pub fn hl(&self) -> u16 {
         return ((self.h as u16) << 8) | self.l as u16;
     }
 
-    fn bc(&self) -> u16 {
+    pub fn bc(&self) -> u16 {
         return ((self.b as u16) << 8) | self.c as u16;
     }
 
-    fn de(&self) -> u16 {
+    pub fn de(&self) -> u16 {
         return ((self.d as u16) << 8) | self.e as u16;
     }
 
@@ -789,7 +795,7 @@ impl Cpu {
             // 0xd2	JNC adr	3		if NCY, PC<-adr
             0xD2 => self.op_jump(!self.cc.cy),
             // 0xd3	OUT D8	2		special
-            0xD3 => {}
+            0xD3 => (self.port_out)(self.next_byte(), self.a),
             // 0xd4	CNC adr	3		if NCY, CALL adr
             0xD4 => self.op_call(!self.cc.cy),
             // 0xd6	SUI D8	2	Z, S, P, CY, AC	A <- A - data
@@ -799,7 +805,7 @@ impl Cpu {
             // 0xda	JC adr	3		if CY, PC<-adr
             0xDA => self.op_jump(self.cc.cy),
             // 0xdb	IN D8	2		special
-            0xDB => {}
+            0xDB => self.a = (self.port_in)(self.next_byte()),
             // 0xdc	CC adr	3		if CY, CALL adr
             0xDC => self.op_call(self.cc.cy),
             // 0xdd	-

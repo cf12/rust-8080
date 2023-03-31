@@ -5,6 +5,7 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::EventPump;
 use std::collections::HashMap;
+use std::io::{self, BufRead};
 use std::time::Instant;
 
 use sdl2::event::Event;
@@ -16,18 +17,6 @@ use std::time::Duration;
 
 pub const VIDEO_WIDTH: usize = 224;
 pub const VIDEO_HEIGHT: usize = 256;
-
-/*
-    1	2	3	4
-    Q	W	E	R
-    A   S   D   F
-    Z   X   C   V
-
-    1	2	3	C
-    4	5	6	D
-    7	8	9	E
-    A	0	B	F
-*/
 
 pub struct SDLGui {
     cpu: Cpu,
@@ -128,6 +117,16 @@ impl SDLGui {
             //     break;
             // }
 
+            for event in self.event_pump.poll_iter() {
+                match event {
+                    Event::Quit {..} |
+                    Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
+                        break
+                    },
+                    _ => {}
+                }
+            }
+
             self.canvas.clear();
 
             let now = Instant::now();
@@ -137,8 +136,12 @@ impl SDLGui {
             let video = self.cpu.get_video();
 
             self.canvas.set_draw_color(Color::RGB(255, 255, 255));
-            for (i, pixel) in video.iter().enumerate() {
-                if *pixel {
+
+            println!("{:?}", video);
+
+            for i in 0..(VIDEO_HEIGHT * VIDEO_WIDTH) {
+                let pixel = ((video.get(i / 8).unwrap() >> (i % 8)) & 0b1) == 0b1;
+                if pixel {
                     let x = (i % VIDEO_WIDTH) as u32;
                     let y = (i / VIDEO_WIDTH) as u32;
 
@@ -154,6 +157,11 @@ impl SDLGui {
 
             self.canvas.present();
             self.canvas.set_draw_color(Color::RGB(0, 0, 0));
+
+            // let stdin = io::stdin();
+            // for line in stdin.lock().lines() {
+            //     println!("{}", line.unwrap());
+            // }
 
             if elapsed < duration {
                 std::thread::sleep(duration - elapsed);
