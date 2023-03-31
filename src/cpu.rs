@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{process::exit, fs};
+use std::{fs, process::exit};
 
 // TODO: use addr type
 type Addr = u16;
@@ -130,7 +130,8 @@ impl Cpu {
     fn next_word(&mut self) -> u16 {
         self.pc += 2;
         // little endian
-        return ((self.mem[(self.pc - 1) as usize] as u16) << 8) | (self.mem[(self.pc - 2) as usize] as u16);
+        return ((self.mem[(self.pc - 1) as usize] as u16) << 8)
+            | (self.mem[(self.pc - 2) as usize] as u16);
     }
 
     fn set_hl(&mut self, hl: u16) {
@@ -197,23 +198,31 @@ impl Cpu {
         self.cc.set_szapc(res, cy);
     }
 
-    fn op_jump(&mut self, addr: u16) {
-        self.pc = addr;
+    fn op_jump(&mut self, cond: bool) {
+        if cond {
+            self.pc = self.next_word();
+        }
     }
 
-    fn op_call(&mut self, addr: u16) {
-        self.mem[(self.sp - 1) as usize] = self.pc as u8;
-        self.mem[(self.sp - 2) as usize] = (self.pc >> 2) as u8;
-        self.pc = addr;
-        self.sp -= 2;
+    fn op_call(&mut self, cond: bool) {
+        if cond {
+            let addr = self.next_word();
+            self.mem[(self.sp - 1) as usize] = self.pc as u8;
+            self.mem[(self.sp - 2) as usize] = (self.pc >> 2) as u8;
+            self.pc = addr;
+            self.sp -= 2;
+        }
     }
 
-    fn op_ret(&mut self) {
-        self.pc = ((self.mem[(self.sp + 1) as usize] as u16) << 2) | self.mem[(self.sp + 2) as usize] as u16;
-        self.sp += 2
+    fn op_ret(&mut self, cond: bool) {
+        if cond {
+            self.pc = ((self.mem[(self.sp + 1) as usize] as u16) << 2)
+                | self.mem[(self.sp + 2) as usize] as u16;
+            self.sp += 2
+        }
     }
 
-    pub fn get_video(self) -> Vec<u8> {
+    pub fn get_video(&self) -> Vec<u8> {
         return self.mem[VIDEO_START..VIDEO_END].to_vec();
     }
 
@@ -250,9 +259,9 @@ impl Cpu {
             }
 
             // 0x02	STAX B	1		(BC) <- A
-            0x02 => {}
+            0x02 => self.mem[bc as usize] = self.a,
             // 0x12	STAX D	1		(DE) <- A
-            0x12 => {}
+            0x12 => self.mem[de as usize] = self.a,
 
             // 0x03	INX B	1		BC <- BC + 1
             0x03 => self.set_bc(bc + 1),
@@ -703,11 +712,7 @@ impl Cpu {
             0xBF => self.op_cmp(self.a),
 
             // 0xc0	RNZ	1		if NZ, RET
-            0xC0 => {
-                if !self.cc.z {
-                    self.op_ret();
-                }
-            }
+            0xC0 => self.op_ret(!self.cc.z),
 
             // 0xc1	POP B	1		C <- (sp); B <- (sp+1); sp <- sp+2
             0xC1 => {
@@ -760,181 +765,81 @@ impl Cpu {
             }
 
             // 0xc2	JNZ adr	3		if NZ, PC <- adr
-            0xC2 => {
-                if !self.cc.z {
-                    let addr = self.next_word();
-                    self.op_jump(addr);
-                }
-            }
+            0xC2 => self.op_jump(!self.cc.z),
             // 0xc3	JMP adr	3		PC <= adr
-            0xC3 => {
-                let addr = self.next_word();
-                self.op_jump(addr);
-            }
+            0xC3 => self.op_jump(true),
             // 0xc4	CNZ adr	3		if NZ, CALL adr
-            0xC4 => {
-                if !self.cc.z {
-                    let addr = self.next_word();
-                    self.op_call(addr);
-                }
-            }
+            0xC4 => self.op_call(!self.cc.z),
             // 0xc6	ADI D8	2	Z, S, P, CY, AC	A <- A + byte
             // 0xc7	RST 0	1		CALL $0
             // 0xc8	RZ	1		if Z, RET
-            0xC8 => {
-                if self.cc.z {
-                    self.op_ret();
-                }
-            }
+            0xC8 => self.op_ret(self.cc.z),
             // 0xc9	RET	1		PC.lo <- (sp); PC.hi<-(sp+1); SP <- SP+2
             // 0xca	JZ adr	3		if Z, PC <- adr
-            0xCA => {
-                if self.cc.z {
-                    let addr = self.next_word();
-                    self.op_jump(addr);
-                }
-            }
+            0xCA => self.op_jump(self.cc.z),
             // 0xcb	-
             // 0xcc	CZ adr	3		if Z, CALL adr
-            0xCC => {
-                if self.cc.z {
-                    let addr = self.next_word();
-                    self.op_call(addr);
-                }
-            }
+            0xCC => self.op_call(self.cc.z),
             // 0xcd	CALL adr	3		(SP-1)<-PC.hi;(SP-2)<-PC.lo;SP<-SP-2;PC=adr
-            0xCD => {
-                let addr = self.next_word();
-                self.op_call(addr);
-            }
+            0xCD => self.op_call(true),
             // 0xce	ACI D8	2	Z, S, P, CY, AC	A <- A + data + CY
             // 0xcf	RST 1	1		CALL $8
             // 0xd0	RNC	1		if NCY, RET
-            0xD0 => {
-                if !self.cc.cy {
-                    self.op_ret();
-                }
-            }
+            0xD0 => self.op_ret(!self.cc.cy),
             // 0xd2	JNC adr	3		if NCY, PC<-adr
-            0xD2 => {
-                if !self.cc.cy {
-                    let addr = self.next_word();
-                    self.op_jump(addr);
-                }
-            }
+            0xD2 => self.op_jump(!self.cc.cy),
             // 0xd3	OUT D8	2		special
             0xD3 => {}
             // 0xd4	CNC adr	3		if NCY, CALL adr
-            0xD4 => {
-                if !self.cc.cy {
-                    let addr = self.next_word();
-                    self.op_call(addr);
-                }
-            }
+            0xD4 => self.op_call(!self.cc.cy),
             // 0xd6	SUI D8	2	Z, S, P, CY, AC	A <- A - data
             // 0xd7	RST 2	1		CALL $10
             // 0xd8	RC	1		if CY, RET
             // 0xd9	-
             // 0xda	JC adr	3		if CY, PC<-adr
-            0xDA => {
-                if self.cc.cy {
-                    let addr = self.next_word();
-                    self.op_jump(addr);
-                }
-            }
+            0xDA => self.op_jump(self.cc.cy),
             // 0xdb	IN D8	2		special
             0xDB => {}
             // 0xdc	CC adr	3		if CY, CALL adr
-            0xDC => {
-                if self.cc.cy {
-                    let addr = self.next_word();
-                    self.op_call(addr);
-                }
-            }
+            0xDC => self.op_call(self.cc.cy),
             // 0xdd	-
             // 0xde	SBI D8	2	Z, S, P, CY, AC	A <- A - data - CY
             // 0xdf	RST 3	1		CALL $18
             // 0xe0	RPO	1		if PO, RET
-            0xE0 => {
-                if self.cc.p {
-                    self.op_ret()
-                }
-            }
+            0xE0 => self.op_ret(self.cc.p),
             // 0xe2	JPO adr	3		if PO, PC <- adr
-            0xE2 => {
-                if self.cc.p {
-                    let addr = self.next_word();
-                    self.op_jump(addr);
-                }
-            }
+            0xE2 => self.op_jump(self.cc.p),
             // 0xe3	XTHL	1		L <-> (SP); H <-> (SP+1)
             // 0xe4	CPO adr	3		if PO, CALL adr
-            0xE4 => {
-                if self.cc.p {
-                    let addr = self.next_word();
-                    self.op_call(addr);
-                }
-            }
+            0xE4 => self.op_call(self.cc.p),
             // 0xe6	ANI D8	2	Z, S, P, CY, AC	A <- A & data
             // 0xe7	RST 4	1		CALL $20
             // 0xe8	RPE	1		if PE, RET
-            0xE8 => {
-                if !self.cc.p {
-                    self.op_ret()
-                }
-            }
+            0xE8 => self.op_ret(!self.cc.p),
             // 0xe9	PCHL	1		PC.hi <- H; PC.lo <- L
             // 0xea	JPE adr	3		if PE, PC <- adr
-            0xEA => {
-                if !self.cc.p {
-                    let addr = self.next_word();
-                    self.op_jump(addr);
-                }
-            }
+            0xEA => self.op_jump(!self.cc.p),
             // 0xeb	XCHG	1		H <-> D; L <-> E
             // 0xec	CPE adr	3		if PE, CALL adr
-            0xEC => {
-                if !self.cc.p {
-                    let addr = self.next_word();
-                    self.op_call(addr);
-                }
-            }
+            0xEC => self.op_call(!self.cc.p),
             // 0xed	-
             // 0xee	XRI D8	2	Z, S, P, CY, AC	A <- A ^ data
             // 0xef	RST 5	1		CALL $28
             // 0xf0	RP	1		if P, RET
-            0xF0 => {
-                if self.cc.p {
-                    self.op_ret()
-                }
-            }
+            0xF0 => self.op_ret(self.cc.p),
             // 0xf2	JP adr	3		if P=1 PC <- adr
-            0xF2 => {
-                if self.cc.s {
-                    let addr = self.next_word();
-                    self.op_jump(addr);
-                }
-            }
+            0xF2 => self.op_jump(self.cc.s),
             // 0xf3	DI	1		special
-            0xF3 => {
-                self.inte = false;
-            }
+            0xF3 => self.inte = false,
             // 0xf4	CP adr	3		if P, PC <- adr
             // 0xf6	ORI D8	2	Z, S, P, CY, AC	A <- A | data
             // 0xf7	RST 6	1		CALL $30
             // 0xf8	RM	1		if M, RET
             // 0xf9	SPHL	1		SP=HL
             // 0xfa	JM adr	3		if M, PC <- adr
-            0xFA => {
-                if !self.cc.s {
-                    let addr = self.next_word();
-                    self.op_jump(addr);
-                }
-            }
+            0xFA => self.op_jump(!self.cc.s),
             // 0xfb	EI	1		special
-            0xFB => {
-                self.inte = true;
-            }
+            0xFB => self.inte = true,
             // 0xfc	CM adr	3		if M, CALL adr
             // 0xfd	-
             // 0xfe	CPI D8	2	Z, S, P, CY, AC	A - data
