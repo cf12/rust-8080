@@ -1,45 +1,48 @@
+use std::{path::Path, io};
+
 use crate::cpu::Cpu;
 
-pub struct Test {
-    cpu: Cpu,
-    done: bool,
-}
+fn test(path: impl AsRef<Path>) {
+    let mut cpu = Cpu::new();
 
-impl Test {
-    pub fn new() -> Self {
-        let this = Test { Cpu: None, done: false };
+    cpu.load_rom(path, 0x100);
 
-        let mut cpu = Cpu::new(
-            &(this.port_in),
-            &(this.port_out),
-        );
-        cpu.load_rom(&String::from("roms/test"));
+    cpu.mem[0x0005] = 0xc9;
+    cpu.pc = 0x100;
 
-        this
-    }
+    println!("{}", cpu);
 
-    fn port_in(port: u8) -> u8 {
-        0x00
-    }
+    loop {
+        let mut buffer = String::new();
+        let stdin = io::stdin(); // We get `Stdin` here.
+        stdin.read_line(&mut buffer).unwrap();
 
-    fn port_out(&mut self, port: u8, value: u8) {
-        match port {
-            0x0 => self.done = true,
-            0x1 => {
-                let op = self.cpu.c;
+        cpu.cycle();
+        println!("{}", cpu);
+
+        match cpu.pc {
+            0x00 => break,
+            0x05 => {
+                let op = cpu.c;
 
                 match op {
-                    0x2 => print!("{}", self.cpu.e as char),
+                    0x2 => print!("{}", cpu.e as char),
                     0x9 => {
-                        let mut addr = self.cpu.de();
+                        let mut addr = cpu.de();
 
-                        while self.cpu.mem[addr as usize] as char != '$' {
-                            print!("{}", self.cpu.mem[addr as usize]);
+                        while cpu.mem[addr as usize] as char != '$' {
+                            print!("{}", cpu.mem[addr as usize] as char);
                             addr += 1;
                         }
                     }
+                    _ => (),
                 }
             }
+            _ => (),
         }
     }
+}
+
+pub fn main() {
+    test("./roms/TST8080.COM");
 }

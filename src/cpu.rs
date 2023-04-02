@@ -1,8 +1,8 @@
 use core::fmt;
-use std::{fs, process::exit};
+use std::{fs, path::Path, process::exit};
 
 // TODO: use addr type
-type Addr = u16;
+type Addr = usize;
 
 // TODO: use bitfield crate maybe
 pub struct CpuFlags {
@@ -30,9 +30,6 @@ pub struct Cpu {
     pub cc: CpuFlags,
 
     pub inte: bool,
-
-    port_in: fn(u8) -> u8,
-    port_out: fn(u8, u8),
 }
 
 pub const VIDEO_START: usize = 0x2400;
@@ -82,18 +79,26 @@ impl CpuFlags {
 
 impl fmt::Display for Cpu {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[af]: {:02X}{:02X} | ", self.a, self.cc.encode_u8())?;
-        write!(f, "[bc]: {:02X}{:02X} | ", self.b, self.c)?;
-        write!(f, "[de]: {:02X}{:02X} | ", self.d, self.e)?;
-        write!(f, "[hl]: {:02X}{:02X}\n", self.h, self.l)?;
-        write!(f, "[pc]: {:04X} | ", self.pc)?;
-        write!(f, "[sp]: {:04X} | ", self.sp)?;
-        write!(f, "[op]: {:02X}\n", self.mem[self.pc as usize])
+        write!(f, "PC: {:04X}, ", self.pc)?;
+        write!(f, "AF: {:02X}{:02X}, ", self.a, self.cc.encode_u8())?;
+        write!(f, "BC: {:02X}{:02X}, ", self.b, self.c)?;
+        write!(f, "DE: {:02X}{:02X}, ", self.d, self.e)?;
+        write!(f, "HL: {:02X}{:02X}, ", self.h, self.l)?;
+        write!(f, "SP: {:04X}\t", self.sp)?;
+        write!(
+            f,
+            "({:02X} {:02X} {:02X} {:02X})\t",
+            self.mem[self.pc as usize],
+            self.mem[self.pc as usize + 1],
+            self.mem[self.pc as usize + 2],
+            self.mem[self.pc as usize + 3],
+        )
+        // write!(f, "{}", self.disas_op())
     }
 }
 
 impl Cpu {
-    pub fn new(port_in: fn(u8) -> u8, port_out: fn(u8, u8)) -> Cpu {
+    pub fn new() -> Cpu {
         Cpu {
             a: 0,
             b: 0,
@@ -117,27 +122,33 @@ impl Cpu {
             },
 
             inte: false,
-
-            port_in,
-            port_out,
         }
     }
 
-    pub fn load_rom(&mut self, path: &String) {
+    pub fn load_rom(&mut self, path: impl AsRef<Path>, offset: usize) {
         let rom = fs::read(path).expect("Cannot read ROM file");
-        self.mem[..rom.len()].copy_from_slice(&rom);
+        self.mem[offset..rom.len() + offset].copy_from_slice(&rom);
+    }
+
+    fn read_byte(&self, loc: u16) -> u8 {
+        let l = loc as usize;
+        return self.mem[l];
+    }
+
+    fn read_word(&self, loc: u16) -> u16 {
+        let l = loc as usize;
+        // little endian
+        return ((self.mem[l + 1] as u16) << 8) | (self.mem[l] as u16);
     }
 
     fn next_byte(&mut self) -> u8 {
         self.pc += 1;
-        return self.mem[(self.pc - 1) as usize];
+        return self.read_byte(self.pc - 1);
     }
 
     fn next_word(&mut self) -> u16 {
         self.pc += 2;
-        // little endian
-        return ((self.mem[(self.pc - 1) as usize] as u16) << 8)
-            | (self.mem[(self.pc - 2) as usize] as u16);
+        return self.read_word(self.pc - 2);
     }
 
     fn set_hl(&mut self, hl: u16) {
@@ -227,6 +238,14 @@ impl Cpu {
             self.sp += 2
         }
     }
+
+    fn pop(&mut self) -> u16 {
+        let ret = self.mem[self.sp as usize] as u16 | self.mem[(self.sp + 1) as usize] as u16;
+        self.sp += 2;
+        return ret;
+    }
+
+    fn push(&mut self, val: u16) {}
 
     pub fn get_video(&self) -> Vec<u8> {
         return self.mem[VIDEO_START..VIDEO_END].to_vec();
@@ -722,10 +741,10 @@ impl Cpu {
 
             // 0xc1	POP B	1		C <- (sp); B <- (sp+1); sp <- sp+2
             0xC1 => {
-                self.c = self.mem[(self.sp) as usize];
-                self.b = self.mem[(self.sp + 1) as usize];
-                self.sp += 2;
+                let a = self.pop();
+                self.set_bc(a);
             }
+
             // 0xd1	POP D	1		E <- (sp); D <- (sp+1); sp <- sp+2
             0xD1 => {
                 self.e = self.mem[(self.sp) as usize];
@@ -753,9 +772,7 @@ impl Cpu {
             }
             // 0xd5	PUSH D	1		(sp-2)<-E; (sp-1)<-D; sp <- sp - 2
             0xD5 => {
-                self.mem[(self.sp - 1) as usize] = self.d;
-                self.mem[(self.sp - 2) as usize] = self.e;
-                self.sp -= 2;
+                self.push(de);
             }
             // 0xe5	PUSH H	1		(sp-2)<-L; (sp-1)<-H; sp <- sp - 2
             0xE5 => {
@@ -781,6 +798,7 @@ impl Cpu {
             // 0xc8	RZ	1		if Z, RET
             0xC8 => self.op_ret(self.cc.z),
             // 0xc9	RET	1		PC.lo <- (sp); PC.hi<-(sp+1); SP <- SP+2
+            0xC9 => self.op_ret(true),
             // 0xca	JZ adr	3		if Z, PC <- adr
             0xCA => self.op_jump(self.cc.z),
             // 0xcb	-
@@ -795,7 +813,9 @@ impl Cpu {
             // 0xd2	JNC adr	3		if NCY, PC<-adr
             0xD2 => self.op_jump(!self.cc.cy),
             // 0xd3	OUT D8	2		special
-            0xD3 => (self.port_out)(self.next_byte(), self.a),
+            0xD3 => {
+                self.next_byte();
+            }
             // 0xd4	CNC adr	3		if NCY, CALL adr
             0xD4 => self.op_call(!self.cc.cy),
             // 0xd6	SUI D8	2	Z, S, P, CY, AC	A <- A - data
@@ -805,7 +825,9 @@ impl Cpu {
             // 0xda	JC adr	3		if CY, PC<-adr
             0xDA => self.op_jump(self.cc.cy),
             // 0xdb	IN D8	2		special
-            0xDB => self.a = (self.port_in)(self.next_byte()),
+            0xDB => {
+                self.next_byte();
+            }
             // 0xdc	CC adr	3		if CY, CALL adr
             0xDC => self.op_call(self.cc.cy),
             // 0xdd	-
@@ -826,6 +848,7 @@ impl Cpu {
             // 0xea	JPE adr	3		if PE, PC <- adr
             0xEA => self.op_jump(!self.cc.p),
             // 0xeb	XCHG	1		H <-> D; L <-> E
+            0xEB => (self.h, self.l, self.d, self.e) = (self.d, self.e, self.h, self.l),
             // 0xec	CPE adr	3		if PE, CALL adr
             0xEC => self.op_call(!self.cc.p),
             // 0xed	-
@@ -855,4 +878,265 @@ impl Cpu {
             }
         }
     }
+
+    // fn disas_op(&self) -> String {
+    //     return match self.mem[self.pc as usize] {
+    //         0x00 => format!("NOP   "),
+    //         0x01 => format!("LXI   B, ${:04X}", self.read_word(self.pc)),
+    //         0x02 => format!("STAX  B"),
+    //         0x03 => format!("INX   B"),
+    //         0x04 => format!("INR   B"),
+    //         0x05 => format!("DCR   B"),
+    //         0x06 => format!("MVI   B, #${:02x}", self.read_byte()),
+    //         0x07 => format!("RLC"),
+    //         0x08 => format!("NOP"),
+    //         0x09 => format!("DAD   B"),
+    //         0x0A => format!("LDAX  B"),
+    //         0x0B => format!("DCX   B"),
+    //         0x0C => format!("INR   C"),
+    //         0x0D => format!("DCR   C"),
+    //         0x0E => format!("MVI   C, ${:02X}", self.read_byte()),
+    //         0x0F => format!("RRC"),
+    //         0x10 => format!("NOP"),
+    //         0x11 => format!("LXI   D, #${:04X}", self.read_word()),
+    //         0x12 => format!("STAX  D"),
+    //         0x13 => format!("INX   D"),
+    //         0x14 => format!("INR   D"),
+    //         0x15 => format!("DCR   D"),
+    //         0x16 => format!("MVI   D, #${:02X}", self.read_byte()),
+    //         0x17 => format!("RAL"),
+    //         0x18 => format!("NOP"),
+    //         0x19 => format!("DAD   D"),
+    //         0x1A => format!("LDAX  D"),
+    //         0x1B => format!("DCX   D"),
+    //         0x1C => format!("INR   E"),
+    //         0x1D => format!("DCR   E"),
+    //         0x1E => format!("MVI   E, #${:02X}", self.read_byte()),
+    //         0x1F => format!("RAR"),
+    //         0x20 => format!("NOP"),
+    //         0x21 => format!("LXI   H, #${:04X}", self.read_word()),
+    //         0x22 => format!("SHLD  #${:04X}", self.read_word()),
+    //         0x23 => format!("INX   H"),
+    //         0x24 => format!("INR   H"),
+    //         0x25 => format!("DCR   H"),
+    //         0x26 => format!("MVI   H, #${:02X}", self.read_byte()),
+    //         0x27 => format!("DAA"),
+    //         0x28 => format!("NOP"),
+    //         0x29 => format!("DAD   H"),
+    //         0x2A => format!("LHLD  #${:04X}", self.read_byte()),
+    //         0x2B => format!("DCX   H"),
+    //         0x2C => format!("INR   L"),
+    //         0x2D => format!("DCR   L"),
+    //         0x2E => format!("MVI   L, #${:02X}", self.read_byte()),
+    //         0x2F => format!("CMA"),
+    //         0x30 => format!("NOP"),
+    //         0x31 => format!("LXI   SP, #${:04X}", self.read_word()),
+    //         0x32 => format!("STA   ${:04X}", self.read_word()),
+    //         0x33 => format!("INX   SP"),
+    //         0x34 => format!("INR   M"),
+    //         0x35 => format!("DCR   M"),
+    //         0x36 => format!("MVI   M, #${:02X}", self.read_byte()),
+    //         0x37 => format!("STC"),
+    //         0x38 => format!("NOP"),
+    //         0x39 => format!("DAD   SP"),
+    //         0x3A => format!("LDA   #${:04X}", self.read_byte()),
+    //         0x3B => format!("DCX   SP"),
+    //         0x3C => format!("INR   A"),
+    //         0x3D => format!("DCR   A"),
+    //         0x3E => format!("MVI   A, #${:02X}", self.read_byte()),
+    //         0x3F => format!("CMC"),
+    //         0x40 => format!("MOV   B, B"),
+    //         0x41 => format!("MOV   B, C"),
+    //         0x42 => format!("MOV   B, D"),
+    //         0x43 => format!("MOV   B, E"),
+    //         0x44 => format!("MOV   B, H"),
+    //         0x45 => format!("MOV   B, L"),
+    //         0x46 => format!("MOV   B, M"),
+    //         0x47 => format!("MOV   B, A"),
+    //         0x48 => format!("MOV   C, B"),
+    //         0x49 => format!("MOV   C, C"),
+    //         0x4A => format!("MOV   C, D"),
+    //         0x4B => format!("MOV   C, E"),
+    //         0x4C => format!("MOV   C, H"),
+    //         0x4D => format!("MOV   C, L"),
+    //         0x4E => format!("MOV   C, M"),
+    //         0x4F => format!("MOV   C, A"),
+    //         0x50 => format!("MOV   D, B"),
+    //         0x51 => format!("MOV   D, C"),
+    //         0x52 => format!("MOV   D, D"),
+    //         0x53 => format!("MOV   D, E"),
+    //         0x54 => format!("MOV   D, H"),
+    //         0x55 => format!("MOV   D, L"),
+    //         0x56 => format!("MOV   D, M"),
+    //         0x57 => format!("MOV   D, A"),
+    //         0x58 => format!("MOV   E, B"),
+    //         0x59 => format!("MOV   E, C"),
+    //         0x5A => format!("MOV   E, D"),
+    //         0x5B => format!("MOV   E, E"),
+    //         0x5C => format!("MOV   E, H"),
+    //         0x5D => format!("MOV   E, L"),
+    //         0x5E => format!("MOV   E, M"),
+    //         0x5F => format!("MOV   E, A"),
+    //         0x60 => format!("MOV   H, B"),
+    //         0x61 => format!("MOV   H, C"),
+    //         0x62 => format!("MOV   H, D"),
+    //         0x63 => format!("MOV   H, E"),
+    //         0x64 => format!("MOV   H, H"),
+    //         0x65 => format!("MOV   H, L"),
+    //         0x66 => format!("MOV   H, M"),
+    //         0x67 => format!("MOV   H, A"),
+    //         0x68 => format!("MOV   L, B"),
+    //         0x69 => format!("MOV   L, C"),
+    //         0x6A => format!("MOV   L, D"),
+    //         0x6B => format!("MOV   L, E"),
+    //         0x6C => format!("MOV   L, H"),
+    //         0x6D => format!("MOV   L, L"),
+    //         0x6E => format!("MOV   L, M"),
+    //         0x6F => format!("MOV   L, A"),
+    //         0x70 => format!("MOV   M, B"),
+    //         0x71 => format!("MOV   M, C"),
+    //         0x72 => format!("MOV   M, D"),
+    //         0x73 => format!("MOV   M, E"),
+    //         0x74 => format!("MOV   M, H"),
+    //         0x75 => format!("MOV   M, L"),
+    //         0x76 => format!("HLT"),
+    //         0x77 => format!("MOV   M, A"),
+    //         0x78 => format!("MOV   A, B"),
+    //         0x79 => format!("MOV   A, C"),
+    //         0x7A => format!("MOV   A, D"),
+    //         0x7B => format!("MOV   A, E"),
+    //         0x7C => format!("MOV   A, H"),
+    //         0x7D => format!("MOV   A, L"),
+    //         0x7E => format!("MOV   A, M"),
+    //         0x7F => format!("MOV   A, A"),
+    //         0x80 => format!("ADD   B"),
+    //         0x81 => format!("ADD   C"),
+    //         0x82 => format!("ADD   D"),
+    //         0x83 => format!("ADD   E"),
+    //         0x84 => format!("ADD   H"),
+    //         0x85 => format!("ADD   L"),
+    //         0x86 => format!("ADD   M"),
+    //         0x87 => format!("ADD   A"),
+    //         0x88 => format!("ADC   B"),
+    //         0x89 => format!("ADC   C"),
+    //         0x8A => format!("ADC   D"),
+    //         0x8B => format!("ADC   E"),
+    //         0x8C => format!("ADC   H"),
+    //         0x8D => format!("ADC   L"),
+    //         0x8E => format!("ADC   M"),
+    //         0x8F => format!("ADC   A"),
+    //         0x90 => format!("SUB   B"),
+    //         0x91 => format!("SUB   C"),
+    //         0x92 => format!("SUB   D"),
+    //         0x93 => format!("SUB   E"),
+    //         0x94 => format!("SUB   H"),
+    //         0x95 => format!("SUB   L"),
+    //         0x96 => format!("SUB   M"),
+    //         0x97 => format!("SUB   A"),
+    //         0x98 => format!("SBB   B"),
+    //         0x99 => format!("SBB   C"),
+    //         0x9A => format!("SBB   D"),
+    //         0x9B => format!("SBB   E"),
+    //         0x9C => format!("SBB   H"),
+    //         0x9D => format!("SBB   L"),
+    //         0x9E => format!("SBB   M"),
+    //         0x9F => format!("SBB   A"),
+    //         0xA0 => format!("ANA   B"),
+    //         0xA1 => format!("ANA   C"),
+    //         0xA2 => format!("ANA   D"),
+    //         0xA3 => format!("ANA   E"),
+    //         0xA4 => format!("ANA   H"),
+    //         0xA5 => format!("ANA   L"),
+    //         0xA6 => format!("ANA   M"),
+    //         0xA7 => format!("ANA   A"),
+    //         0xA8 => format!("XRA   B"),
+    //         0xA9 => format!("XRA   C"),
+    //         0xAA => format!("XRA   D"),
+    //         0xAB => format!("XRA   E"),
+    //         0xAC => format!("XRA   H"),
+    //         0xAD => format!("XRA   L"),
+    //         0xAE => format!("XRA   M"),
+    //         0xAF => format!("XRA   A"),
+    //         0xB0 => format!("ORA   B"),
+    //         0xB1 => format!("ORA   C"),
+    //         0xB2 => format!("ORA   D"),
+    //         0xB3 => format!("ORA   E"),
+    //         0xB4 => format!("ORA   H"),
+    //         0xB5 => format!("ORA   L"),
+    //         0xB6 => format!("ORA   M"),
+    //         0xB7 => format!("ORA   A"),
+    //         0xB8 => format!("CMP   B"),
+    //         0xB9 => format!("CMP   C"),
+    //         0xBA => format!("CMP   D"),
+    //         0xBB => format!("CMP   E"),
+    //         0xBC => format!("CMP   H"),
+    //         0xBD => format!("CMP   L"),
+    //         0xBE => format!("CMP   M"),
+    //         0xBF => format!("CMP   A"),
+    //         0xC0 => format!("RNZ"),
+    //         0xC1 => format!("POP   B"),
+    //         0xC2 => format!("JNZ   ${:04X}", self.read_word()),
+    //         0xC3 => format!("JMP   ${:04X}", self.read_word()),
+    //         0xC4 => format!("CNZ   ${:04X}", self.read_word()),
+    //         0xC5 => format!("PUSH  B"),
+    //         0xC6 => format!("ADI   {:#02X}", self.read_byte()),
+    //         0xC7 => format!("RST   0"),
+    //         0xC8 => format!("RZ"),
+    //         0xC9 => format!("RET"),
+    //         0xCA => format!("JZ    ${:04X}", self.read_word()),
+    //         0xCB => format!("JMP   ${:04X}", self.read_word()),
+    //         0xCC => format!("CZ    ${:04X}", self.read_word()),
+    //         0xCD => format!("CALL  ${:04X}", self.read_word()),
+    //         0xCE => format!("ACI   {:#02X}", self.read_byte()),
+    //         0xCF => format!("RST  1"),
+    //         0xD0 => format!("RNC"),
+    //         0xD1 => format!("POP   D"),
+    //         0xD2 => format!("JNC   {:#04X}", self.read_word()),
+    //         0xD3 => format!("OUT   {:#02X}", self.read_byte()),
+    //         0xD4 => format!("CNC   {:#04X}", self.read_word()),
+    //         0xD5 => format!("PUSH  D"),
+    //         0xD6 => format!("SUI   {:#02X}", self.read_byte()),
+    //         0xD7 => format!("RST   2"),
+    //         0xD8 => format!("RC"),
+    //         0xD9 => format!("RET"),
+    //         0xDA => format!("JC    {:#04X}", self.read_byte()),
+    //         0xDB => format!("IN    {:#02X}", self.read_byte()),
+    //         0xDC => format!("CC    {:#04X}", self.read_byte()),
+    //         0xDD => format!("CALL  {:#04X}", self.read_byte()),
+    //         0xDE => format!("SBI   {:#02X}", self.read_byte()),
+    //         0xDF => format!("RST   3"),
+    //         0xE0 => format!("RPO"),
+    //         0xE1 => format!("POP   H"),
+    //         0xE2 => format!("JPO   {:#04X}", self.read_byte()),
+    //         0xE3 => format!("XTHL"),
+    //         0xE4 => format!("CPO   {:#04X}", self.read_byte()),
+    //         0xE5 => format!("PUSH  H"),
+    //         0xE6 => format!("ANI   {:#02X}", self.read_byte()),
+    //         0xE7 => format!("RST   4"),
+    //         0xE8 => format!("RPE"),
+    //         0xE9 => format!("PCHL"),
+    //         0xEA => format!("JPE   {:#04X}", self.read_byte()),
+    //         0xEB => format!("XCHG"),
+    //         0xEC => format!("CPE   {:#04X}", self.read_byte()),
+    //         0xED => format!("CALL  {:#04X}", self.read_byte()),
+    //         0xEE => format!("XRI   {:#02X}", self.read_byte()),
+    //         0xEF => format!("RST   5"),
+    //         0xF0 => format!("RP"),
+    //         0xF1 => format!("POP   PSW"),
+    //         0xF2 => format!("JP    {:#04X}", self.read_byte()),
+    //         0xF3 => format!("DI"),
+    //         0xF4 => format!("CP    {:#04X}", self.read_byte()),
+    //         0xF5 => format!("PUSH  PSW"),
+    //         0xF6 => format!("ORI   {:#02X}", self.read_byte()),
+    //         0xF7 => format!("RST   6"),
+    //         0xF8 => format!("RM"),
+    //         0xF9 => format!("SPHL"),
+    //         0xFA => format!("JM    {:#04X}", self.read_byte()),
+    //         0xFB => format!("EI"),
+    //         0xFC => format!("CM    {:#04X}", self.read_byte()),
+    //         0xFD => format!("CALL  {:#04X}", self.read_byte()),
+    //         0xFE => format!("CPI   {:#02X}", self.read_byte()),
+    //         0xFF => format!("RST   7"),
+    //     };
+    // }
 }
