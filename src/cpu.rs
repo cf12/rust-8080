@@ -6,12 +6,11 @@ type Addr = usize;
 
 // TODO: use bitfield crate maybe
 pub struct CpuFlags {
-    z: bool,
-    s: bool,
-    p: bool,
-    cy: bool,
-    ac: bool,
-    pad: u8,
+    s: bool, // [7] sign
+    z: bool, // [6] zero
+    a: bool, // [4] auxiliary carry
+    p: bool, // [2] parity
+    c: bool, // [0] carry
 }
 
 pub struct Cpu {
@@ -38,30 +37,25 @@ pub const MEMORY_SIZE: usize = 0x10000;
 
 impl CpuFlags {
     fn encode_u8(&self) -> u8 {
-        return (self.z as u8)
-            | ((self.s as u8) << 1)
+        return ((self.s as u8) << 7)
+            | ((self.z as u8) << 6)
+            | ((self.a as u8) << 4)
             | ((self.p as u8) << 2)
-            | ((self.cy as u8) << 3)
-            | ((self.ac as u8) << 4);
+            | (0b10)
+            | ((self.c as u8) << 0);
     }
 
     fn decode_u8(&mut self, num: u8) {
-        self.z = (num & 0b1) == 0b1;
-        self.s = (num & 0b10) == 0b10;
-        self.p = (num & 0b100) == 0b100;
-        self.cy = (num & 0b1000) == 0b1000;
-        self.ac = (num & 0b10000) == 0b10000;
+        self.s = (num >> 7) == 1;
+        self.z = (num >> 6) == 1;
+        self.a = (num >> 4) == 1;
+        self.p = (num >> 2) == 1;
+        self.c = (num >> 0) == 1;
     }
 
-    fn set_szapc(&mut self, num: u8, cy: bool) {
-        self.set_szap(num);
-        self.set_c(cy);
-    }
-
-    fn set_szap(&mut self, mut num: u8) {
-        self.z = num == 0;
+    fn set_szp(&mut self, mut num: u8) {
         self.s = num >> 7 == 1;
-        self.ac = false;
+        self.z = num == 0;
 
         let mut par = 0;
         while num != 0 {
@@ -69,11 +63,7 @@ impl CpuFlags {
             num >>= 1;
         }
 
-        self.p = par != 0;
-    }
-
-    fn set_c(&mut self, cy: bool) {
-        self.cy = cy;
+        self.p = par == 0;
     }
 }
 
@@ -116,9 +106,8 @@ impl Cpu {
                 z: false,
                 s: false,
                 p: false,
-                cy: false,
-                ac: false,
-                pad: 0,
+                c: false,
+                a: false,
             },
 
             inte: false,
@@ -141,12 +130,12 @@ impl Cpu {
         return ((self.mem[l + 1] as u16) << 8) | (self.mem[l] as u16);
     }
 
-    fn next_byte(&mut self) -> u8 {
+    fn nb(&mut self) -> u8 {
         self.pc += 1;
         return self.read_byte(self.pc - 1);
     }
 
-    fn next_word(&mut self) -> u16 {
+    fn nw(&mut self) -> u16 {
         self.pc += 2;
         return self.read_word(self.pc - 2);
     }
@@ -166,6 +155,11 @@ impl Cpu {
         self.e = (de & 0xFF) as u8
     }
 
+    fn set_af(&mut self, af: u16) {
+        self.a = (af >> 8) as u8;
+        self.cc.decode_u8((af & 0xFF) as u8);
+    }
+
     pub fn hl(&self) -> u16 {
         return ((self.h as u16) << 8) | self.l as u16;
     }
@@ -179,85 +173,101 @@ impl Cpu {
     }
 
     fn op_add(&mut self, rhs: u8) {
-        let (sum, cy) = self.a.overflowing_add(rhs);
+        let (res, cy) = self.a.overflowing_add(rhs);
 
-        self.a = sum;
-        self.cc.set_szapc(sum, cy);
+        self.a = res;
+        self.cc.set_szp(res);
+        self.cc.c = cy
     }
 
     fn op_sub(&mut self, rhs: u8) {
         let (res, cy) = self.a.overflowing_sub(rhs);
 
         self.a = res;
-        self.cc.set_szapc(res, cy);
+        self.cc.set_szp(res);
+        self.cc.c = cy;
     }
 
     fn op_and(&mut self, rhs: u8) {
         let res = self.a & rhs;
+
+        self.cc.set_szp(res);
+        self.cc.a = (self.a | rhs & (0b1000)) == 1;
+
         self.a = res;
-        self.cc.set_szapc(res, false);
     }
 
     fn op_or(&mut self, rhs: u8) {
         let res = self.a | rhs;
         self.a = res;
-        self.cc.set_szapc(res, false);
+        self.cc.set_szp(res);
     }
 
     fn op_xor(&mut self, rhs: u8) {
         let res = self.a ^ rhs;
         self.a = res;
-        self.cc.set_szapc(res, false);
+        self.cc.set_szp(res);
     }
 
     fn op_cmp(&mut self, rhs: u8) {
         let (res, cy) = self.a.overflowing_sub(rhs);
-        self.cc.set_szapc(res, cy);
+
+        self.cc.set_szp(res);
+        self.cc.a = !(self.a ^ res ^ rhs) & 0b10000 == 1;
+        self.cc.c = cy;
     }
 
     fn op_jump(&mut self, cond: bool) {
+        let addr = self.nw();
+
         if cond {
-            self.pc = self.next_word();
+            self.pc = addr;
         }
     }
 
+    fn op_call_addr(&mut self, addr: u16) {
+        self.push(self.pc);
+        self.pc = addr;
+    }
+
     fn op_call(&mut self, cond: bool) {
+        let addr = self.nw();
+
         if cond {
-            let addr = self.next_word();
-            self.mem[(self.sp - 1) as usize] = self.pc as u8;
-            self.mem[(self.sp - 2) as usize] = (self.pc >> 2) as u8;
-            self.pc = addr;
-            self.sp -= 2;
+            self.op_call_addr(addr);
         }
     }
 
     fn op_ret(&mut self, cond: bool) {
         if cond {
-            self.pc = ((self.mem[(self.sp + 1) as usize] as u16) << 2)
-                | self.mem[(self.sp + 2) as usize] as u16;
-            self.sp += 2
+            self.pc = self.pop();
         }
     }
 
     fn pop(&mut self) -> u16 {
-        let ret = self.mem[self.sp as usize] as u16 | self.mem[(self.sp + 1) as usize] as u16;
         self.sp += 2;
-        return ret;
+        return ((self.mem[(self.sp - 2) as usize] as u16) << 8)
+            | self.mem[(self.sp - 1) as usize] as u16;
     }
 
-    fn push(&mut self, val: u16) {}
+    fn push(&mut self, val: u16) {
+        self.sp -= 2;
+        self.mem[self.sp as usize] = (val >> 8) as u8;
+        self.mem[(self.sp + 1) as usize] = (val & 0xFF) as u8;
+    }
 
     pub fn get_video(&self) -> Vec<u8> {
         return self.mem[VIDEO_START..VIDEO_END].to_vec();
     }
 
     pub fn cycle(&mut self) {
-        let op = self.next_byte();
+        let op = self.nb();
 
         // TODO: optimize
         let hl = ((self.h as u16) << 8) | self.l as u16;
         let bc = ((self.b as u16) << 8) | self.c as u16;
         let de = ((self.d as u16) << 8) | self.e as u16;
+        let af = ((self.a as u16) << 8) | self.cc.encode_u8() as u16;
 
         match op {
             // 0x00	NOP	1
@@ -265,22 +275,22 @@ impl Cpu {
 
             // 0x01	LXI B,D16	3		B <- byte 3, C <- byte 2
             0x01 => {
-                self.c = self.next_byte();
-                self.b = self.next_byte();
+                self.c = self.nb();
+                self.b = self.nb();
             }
             // 0x11	LXI D,D16	3		D <- byte 3, E <- byte 2
             0x11 => {
-                self.e = self.next_byte();
-                self.d = self.next_byte();
+                self.e = self.nb();
+                self.d = self.nb();
             }
             // 0x21	LXI H,D16	3		H <- byte 3, L <- byte 2
             0x21 => {
-                self.l = self.next_byte();
-                self.h = self.next_byte();
+                self.l = self.nb();
+                self.h = self.nb();
             }
             // 0x31	LXI SP, D16	3		SP.hi <- byte 3, SP.lo <- byte 2
             0x31 => {
-                self.sp = self.next_word();
+                self.sp = self.nw();
             }
 
             // 0x02	STAX B	1		(BC) <- A
@@ -300,116 +310,116 @@ impl Cpu {
             // 0x04	INR B	1	Z, S, P, AC	B <- B+1
             0x04 => {
                 self.b = self.b.wrapping_add(1);
-                self.cc.set_szap(self.b);
+                self.cc.set_szp(self.b);
             }
             // 0x0c	INR C	1	Z, S, P, AC	C <- C+1
             0x0C => {
                 self.c = self.c.wrapping_add(1);
-                self.cc.set_szap(self.c);
+                self.cc.set_szp(self.c);
             }
             // 0x14	INR D	1	Z, S, P, AC	D <- D+1
             0x14 => {
                 self.d = self.d.wrapping_add(1);
-                self.cc.set_szap(self.d);
+                self.cc.set_szp(self.d);
             }
             // 0x1c	INR E	1	Z, S, P, AC	E <-E+1
             0x1C => {
                 self.e = self.e.wrapping_add(1);
-                self.cc.set_szap(self.e);
+                self.cc.set_szp(self.e);
             }
             // 0x24	INR H	1	Z, S, P, AC	H <- H+1
             0x24 => {
                 self.h = self.h.wrapping_add(1);
-                self.cc.set_szap(self.h);
+                self.cc.set_szp(self.h);
             }
             // 0x2c	INR L	1	Z, S, P, AC	L <- L+1
             0x2C => {
                 self.l = self.l.wrapping_add(1);
-                self.cc.set_szap(self.l);
+                self.cc.set_szp(self.l);
             }
             // 0x34	INR M	1	Z, S, P, AC	(HL) <- (HL)+1
             0x34 => {
                 self.mem[hl as usize] = self.mem[hl as usize].wrapping_add(1);
-                self.cc.set_szap(self.mem[hl as usize]);
+                self.cc.set_szp(self.mem[hl as usize]);
             }
             // 0x3c	INR A	1	Z, S, P, AC	A <- A+1
             0x3C => {
                 self.a = self.a.wrapping_add(1);
-                self.cc.set_szap(self.a);
+                self.cc.set_szp(self.a);
             }
 
             // 0x05	DCR B	1	Z, S, P, AC	B <- B-1
             0x05 => {
                 self.b = self.b.wrapping_sub(1);
-                self.cc.set_szap(self.b);
+                self.cc.set_szp(self.b);
             }
             // 0x0d	DCR C	1	Z, S, P, AC	C <-C-1
             0x0D => {
                 self.c = self.c.wrapping_sub(1);
-                self.cc.set_szap(self.c);
+                self.cc.set_szp(self.c);
             }
             // 0x15	DCR D	1	Z, S, P, AC	D <- D-1
             0x15 => {
                 self.d = self.d.wrapping_sub(1);
-                self.cc.set_szap(self.d)
+                self.cc.set_szp(self.d)
             }
             // 0x1d	DCR E	1	Z, S, P, AC	E <- E-1
             0x1D => {
                 self.e = self.e.wrapping_sub(1);
-                self.cc.set_szap(self.e)
+                self.cc.set_szp(self.e)
             }
             // 0x25	DCR H	1	Z, S, P, AC	H <- H-1
             0x25 => {
                 self.h = self.h.wrapping_sub(1);
-                self.cc.set_szap(self.h)
+                self.cc.set_szp(self.h)
             }
             // 0x2d	DCR L	1	Z, S, P, AC	L <- L-1
             0x2D => {
                 self.l = self.l.wrapping_sub(1);
-                self.cc.set_szap(self.l)
+                self.cc.set_szp(self.l)
             }
             // 0x35	DCR M	1	Z, S, P, AC	(HL) <- (HL)-1
             0x35 => {
                 self.mem[hl as usize] = self.mem[hl as usize].wrapping_sub(1);
-                self.cc.set_szap(self.mem[hl as usize])
+                self.cc.set_szp(self.mem[hl as usize])
             }
             // 0x3d	DCR A	1	Z, S, P, AC	A <- A-1
             0x3D => {
                 self.a = self.a.wrapping_sub(1);
-                self.cc.set_szap(self.a);
+                self.cc.set_szp(self.a);
             }
 
             // 0x06	MVI B, D8	2		B <- byte 2
             0x06 => {
-                self.b = self.next_byte();
+                self.b = self.nb();
             }
             // 0x0e	MVI C,D8	2		C <- byte 2
             0x0E => {
-                self.c = self.next_byte();
+                self.c = self.nb();
             }
             // 0x16	MVI D, D8	2		D <- byte 2
             0x16 => {
-                self.d = self.next_byte();
+                self.d = self.nb();
             }
             // 0x1e	MVI E,D8	2		E <- byte 2
             0x1E => {
-                self.e = self.next_byte();
+                self.e = self.nb();
             }
             // 0x26	MVI H,D8	2		H <- byte 2
             0x26 => {
-                self.h = self.next_byte();
+                self.h = self.nb();
             }
             // 0x2e	MVI L, D8	2		L <- byte 2
             0x2E => {
-                self.l = self.next_byte();
+                self.l = self.nb();
             }
             // 0x36	MVI M,D8	2		(HL) <- byte 2
             0x36 => {
-                self.mem[hl as usize] = self.next_byte();
+                self.mem[hl as usize] = self.nb();
             }
             // 0x3e	MVI A,D8	2		A <- byte 2
             0x3E => {
-                self.a = self.next_byte();
+                self.a = self.nb();
             }
 
             // 0x07	RLC	1	CY	A = A << 1; bit 0 = prev bit 7; CY = prev bit 7
@@ -420,25 +430,25 @@ impl Cpu {
             0x09 => {
                 let (res, cy) = hl.overflowing_add(bc);
                 self.set_hl(res);
-                self.cc.set_c(cy);
+                self.cc.c = cy;
             }
             // 0x19	DAD D	1	CY	HL = HL + DE
             0x19 => {
                 let (res, cy) = hl.overflowing_add(de);
                 self.set_hl(res);
-                self.cc.set_c(cy);
+                self.cc.c = cy;
             }
             // 0x29	DAD H	1	CY	HL = HL + HI
             0x29 => {
                 let (res, cy) = hl.overflowing_add(hl);
                 self.set_hl(res);
-                self.cc.set_c(cy);
+                self.cc.c = cy;
             }
             // 0x39	DAD SP	1	CY	HL = HL + SP
             0x39 => {
                 let (res, cy) = hl.overflowing_add(self.sp);
                 self.set_hl(res);
-                self.cc.set_c(cy);
+                self.cc.c = cy;
             }
 
             // 0x0a	LDAX B	1		A <- (BC)
@@ -469,7 +479,7 @@ impl Cpu {
             // 0x3b	DCX SP	1		SP = SP-1
 
             // 0x3f	CMC	1	CY	CY=!CY
-            0x3f => self.cc.set_c(!self.cc.cy),
+            0x3f => self.cc.c = !self.cc.c,
 
             // 0x40	MOV B,B	1		B <- B
             0x40 => self.b = self.b,
@@ -581,6 +591,7 @@ impl Cpu {
             0x75 => self.mem[hl as usize] = self.l,
             // 0x76	HLT	1		special
             0x76 => exit(0),
+
             // 0x77	MOV M,A	1		(HL) <- A
             0x77 => self.mem[hl as usize] = self.a,
             // 0x78	MOV A,B	1		A <- B
@@ -599,6 +610,7 @@ impl Cpu {
             0x7E => self.a = self.mem[hl as usize],
             // 0x7f	MOV A,A	1		A <- A
             0x7F => self.a = self.a,
+
             // ADD B
             0x80 => self.op_add(self.b),
             // ADD C
@@ -615,22 +627,28 @@ impl Cpu {
             0x86 => self.op_add(self.mem[hl as usize]),
             // ADD A
             0x87 => self.op_add(self.a),
-            // ADC B
-            0x88 => self.op_add(self.b + self.cc.cy as u8),
-            // ADC C
-            0x89 => self.op_add(self.c + self.cc.cy as u8),
-            // ADC D
-            0x8A => self.op_add(self.d + self.cc.cy as u8),
-            // ADC E
-            0x8B => self.op_add(self.e + self.cc.cy as u8),
-            // ADC H
-            0x8C => self.op_add(self.h + self.cc.cy as u8),
-            // ADC L
-            0x8D => self.op_add(self.l + self.cc.cy as u8),
-            // ADI byte
+            // 0xc6	ADI D8	2	Z, S, P, CY, AC	A <- A + byte
             0xC6 => {
-                let byte = self.next_byte();
+                let byte = self.nb();
                 self.op_add(byte);
+            }
+
+            // ADC B
+            0x88 => self.op_add(self.b + self.cc.c as u8),
+            // ADC C
+            0x89 => self.op_add(self.c + self.cc.c as u8),
+            // ADC D
+            0x8A => self.op_add(self.d + self.cc.c as u8),
+            // ADC E
+            0x8B => self.op_add(self.e + self.cc.c as u8),
+            // ADC H
+            0x8C => self.op_add(self.h + self.cc.c as u8),
+            // ADC L
+            0x8D => self.op_add(self.l + self.cc.c as u8),
+            // 0xce	ACI D8	2	Z, S, P, CY, AC	A <- A + data + CY
+            0xCE => {
+                let byte = self.nb();
+                self.op_add(byte + self.cc.c as u8);
             }
 
             // SUB B
@@ -650,23 +668,33 @@ impl Cpu {
             0x96 => self.op_sub(self.mem[hl as usize]),
             // 0x97	SUB A	1	Z, S, P, CY, AC	A <- A - A
             0x97 => self.op_sub(self.a),
+            // 0xd6	SUI D8	2	Z, S, P, CY, AC	A <- A - data
+            0xD6 => {
+                let byte = self.nb();
+                self.op_sub(byte);
+            }
 
             // 0x98	SBB B	1	Z, S, P, CY, AC	A <- A - B - CY
-            0x98 => self.op_sub(self.b - self.cc.cy as u8),
+            0x98 => self.op_sub(self.b - self.cc.c as u8),
             // 0x99	SBB C	1	Z, S, P, CY, AC	A <- A - C - CY
-            0x99 => self.op_sub(self.c - self.cc.cy as u8),
+            0x99 => self.op_sub(self.c - self.cc.c as u8),
             // 0x9a	SBB D	1	Z, S, P, CY, AC	A <- A - D - CY
-            0x9A => self.op_sub(self.d - self.cc.cy as u8),
+            0x9A => self.op_sub(self.d - self.cc.c as u8),
             // 0x9b	SBB E	1	Z, S, P, CY, AC	A <- A - E - CY
-            0x9B => self.op_sub(self.e - self.cc.cy as u8),
+            0x9B => self.op_sub(self.e - self.cc.c as u8),
             // 0x9c	SBB H	1	Z, S, P, CY, AC	A <- A - H - CY
-            0x9C => self.op_sub(self.h - self.cc.cy as u8),
+            0x9C => self.op_sub(self.h - self.cc.c as u8),
             // 0x9d	SBB L	1	Z, S, P, CY, AC	A <- A - L - CY
-            0x9D => self.op_sub(self.l - self.cc.cy as u8),
+            0x9D => self.op_sub(self.l - self.cc.c as u8),
             // 0x9e	SBB M	1	Z, S, P, CY, AC	A <- A - (HL) - CY
-            0x9E => self.op_sub(self.mem[hl as usize] - self.cc.cy as u8),
+            0x9E => self.op_sub(self.mem[hl as usize] - self.cc.c as u8),
             // 0x9f	SBB A	1	Z, S, P, CY, AC	A <- A - A - CY
-            0x9F => self.op_sub(self.a - self.cc.cy as u8),
+            0x9F => self.op_sub(self.a - self.cc.c as u8),
+            // 0xde	SBI D8	2	Z, S, P, CY, AC	A <- A - data - CY
+            0xDE => {
+                let byte = self.nb();
+                self.op_sub(byte - self.cc.c as u8);
+            }
 
             // 0xa0	ANA B	1	Z, S, P, CY, AC	A <- A & B
             0xA0 => self.op_and(self.b),
@@ -684,6 +712,11 @@ impl Cpu {
             0xA6 => self.op_and(self.mem[hl as usize]),
             // 0xa7	ANA A	1	Z, S, P, CY, AC	A <- A & A
             0xA7 => self.op_and(self.a),
+            // 0xe6	ANI D8	2	Z, S, P, CY, AC	A <- A & data
+            0xE6 => {
+                let v = self.nb();
+                self.op_and(v)
+            }
 
             // 0xa8	XRA B	1	Z, S, P, CY, AC	A <- A ^ B
             0xA8 => self.op_xor(self.b),
@@ -701,6 +734,11 @@ impl Cpu {
             0xAE => self.op_xor(self.mem[hl as usize]),
             // 0xaf	XRA A	1	Z, S, P, CY, AC	A <- A ^ A
             0xAF => self.op_xor(self.a),
+            // 0xee	XRI D8	2	Z, S, P, CY, AC	A <- A ^ data
+            0xEE => {
+                let v = self.nb();
+                self.op_xor(v);
+            }
 
             // 0xb0	ORA B	1	Z, S, P, CY, AC	A <- A | B
             0xB0 => self.op_or(self.b),
@@ -735,57 +773,44 @@ impl Cpu {
             0xBE => self.op_cmp(self.mem[hl as usize]),
             // 0xbf	CMP A	1	Z, S, P, CY, AC	A - A
             0xBF => self.op_cmp(self.a),
+            // 0xfe	CPI D8	2	Z, S, P, CY, AC	A - data
+            0xFE => {
+                let byte = self.nb();
+                self.op_cmp(byte);
+            }
 
             // 0xc0	RNZ	1		if NZ, RET
             0xC0 => self.op_ret(!self.cc.z),
 
             // 0xc1	POP B	1		C <- (sp); B <- (sp+1); sp <- sp+2
             0xC1 => {
-                let a = self.pop();
-                self.set_bc(a);
+                let v = self.pop();
+                self.set_bc(v);
             }
-
             // 0xd1	POP D	1		E <- (sp); D <- (sp+1); sp <- sp+2
             0xD1 => {
-                self.e = self.mem[(self.sp) as usize];
-                self.d = self.mem[(self.sp + 1) as usize];
-                self.sp += 2;
+                let v = self.pop();
+                self.set_de(v);
             }
             // 0xe1	POP H	1		L <- (sp); H <- (sp+1); sp <- sp+2
             0xE1 => {
-                self.l = self.mem[(self.sp) as usize];
-                self.h = self.mem[(self.sp + 1) as usize];
-                self.sp += 2;
+                let v = self.pop();
+                self.set_hl(v);
             }
             // 0xf1	POP PSW	1		flags <- (sp); A <- (sp+1); sp <- sp+2
             0xF1 => {
-                self.cc.decode_u8(self.mem[(self.sp) as usize]);
-                self.a = self.mem[(self.sp + 1) as usize];
-                self.sp += 2;
+                let v = self.pop();
+                self.set_af(v);
             }
 
             // 0xc5	PUSH B	1		(sp-2)<-C; (sp-1)<-B; sp <- sp - 2
-            0xC5 => {
-                self.mem[(self.sp - 1) as usize] = self.b;
-                self.mem[(self.sp - 2) as usize] = self.c;
-                self.sp -= 2;
-            }
+            0xC5 => self.push(bc),
             // 0xd5	PUSH D	1		(sp-2)<-E; (sp-1)<-D; sp <- sp - 2
-            0xD5 => {
-                self.push(de);
-            }
+            0xD5 => self.push(de),
             // 0xe5	PUSH H	1		(sp-2)<-L; (sp-1)<-H; sp <- sp - 2
-            0xE5 => {
-                self.mem[(self.sp - 1) as usize] = self.h;
-                self.mem[(self.sp - 2) as usize] = self.l;
-                self.sp -= 2;
-            }
+            0xE5 => self.push(hl),
             // 0xf5	PUSH PSW	1		(sp-2)<-flags; (sp-1)<-A; sp <- sp - 2
-            0xF5 => {
-                self.mem[(self.sp - 1) as usize] = self.a;
-                self.mem[(self.sp - 2) as usize] = self.cc.encode_u8();
-                self.sp -= 2;
-            }
+            0xF5 => self.push(af),
 
             // 0xc2	JNZ adr	3		if NZ, PC <- adr
             0xC2 => self.op_jump(!self.cc.z),
@@ -793,8 +818,6 @@ impl Cpu {
             0xC3 => self.op_jump(true),
             // 0xc4	CNZ adr	3		if NZ, CALL adr
             0xC4 => self.op_call(!self.cc.z),
-            // 0xc6	ADI D8	2	Z, S, P, CY, AC	A <- A + byte
-            // 0xc7	RST 0	1		CALL $0
             // 0xc8	RZ	1		if Z, RET
             0xC8 => self.op_ret(self.cc.z),
             // 0xc9	RET	1		PC.lo <- (sp); PC.hi<-(sp+1); SP <- SP+2
@@ -806,73 +829,75 @@ impl Cpu {
             0xCC => self.op_call(self.cc.z),
             // 0xcd	CALL adr	3		(SP-1)<-PC.hi;(SP-2)<-PC.lo;SP<-SP-2;PC=adr
             0xCD => self.op_call(true),
-            // 0xce	ACI D8	2	Z, S, P, CY, AC	A <- A + data + CY
-            // 0xcf	RST 1	1		CALL $8
             // 0xd0	RNC	1		if NCY, RET
-            0xD0 => self.op_ret(!self.cc.cy),
+            0xD0 => self.op_ret(!self.cc.c),
             // 0xd2	JNC adr	3		if NCY, PC<-adr
-            0xD2 => self.op_jump(!self.cc.cy),
+            0xD2 => self.op_jump(!self.cc.c),
             // 0xd3	OUT D8	2		special
             0xD3 => {
-                self.next_byte();
+                self.nb();
             }
             // 0xd4	CNC adr	3		if NCY, CALL adr
-            0xD4 => self.op_call(!self.cc.cy),
-            // 0xd6	SUI D8	2	Z, S, P, CY, AC	A <- A - data
-            // 0xd7	RST 2	1		CALL $10
+            0xD4 => self.op_call(!self.cc.c),
             // 0xd8	RC	1		if CY, RET
             // 0xd9	-
             // 0xda	JC adr	3		if CY, PC<-adr
-            0xDA => self.op_jump(self.cc.cy),
+            0xDA => self.op_jump(self.cc.c),
             // 0xdb	IN D8	2		special
             0xDB => {
-                self.next_byte();
+                self.nb();
             }
             // 0xdc	CC adr	3		if CY, CALL adr
-            0xDC => self.op_call(self.cc.cy),
+            0xDC => self.op_call(self.cc.c),
             // 0xdd	-
-            // 0xde	SBI D8	2	Z, S, P, CY, AC	A <- A - data - CY
-            // 0xdf	RST 3	1		CALL $18
             // 0xe0	RPO	1		if PO, RET
-            0xE0 => self.op_ret(self.cc.p),
+            0xE0 => self.op_ret(!self.cc.p),
             // 0xe2	JPO adr	3		if PO, PC <- adr
-            0xE2 => self.op_jump(self.cc.p),
+            0xE2 => self.op_jump(!self.cc.p),
+
             // 0xe3	XTHL	1		L <-> (SP); H <-> (SP+1)
+
             // 0xe4	CPO adr	3		if PO, CALL adr
-            0xE4 => self.op_call(self.cc.p),
-            // 0xe6	ANI D8	2	Z, S, P, CY, AC	A <- A & data
+            0xE4 => self.op_call(!self.cc.p),
+
+            // 0xc7	RST 0	1		CALL $0
+            // 0xcf	RST 1	1		CALL $8
+            // 0xd7	RST 2	1		CALL $10
+            // 0xdf	RST 3	1		CALL $18
             // 0xe7	RST 4	1		CALL $20
+            // 0xef	RST 5	1		CALL $28
+            // 0xf7	RST 6	1		CALL $30
+            // 0xff	RST 7	1		CALL $38
+            0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
+                self.op_call_addr((op & 0b111000) as u16)
+            }
+
             // 0xe8	RPE	1		if PE, RET
-            0xE8 => self.op_ret(!self.cc.p),
+            0xE8 => self.op_ret(self.cc.p),
             // 0xe9	PCHL	1		PC.hi <- H; PC.lo <- L
             // 0xea	JPE adr	3		if PE, PC <- adr
-            0xEA => self.op_jump(!self.cc.p),
+            0xEA => self.op_jump(self.cc.p),
             // 0xeb	XCHG	1		H <-> D; L <-> E
             0xEB => (self.h, self.l, self.d, self.e) = (self.d, self.e, self.h, self.l),
             // 0xec	CPE adr	3		if PE, CALL adr
-            0xEC => self.op_call(!self.cc.p),
+            0xEC => self.op_call(self.cc.p),
             // 0xed	-
-            // 0xee	XRI D8	2	Z, S, P, CY, AC	A <- A ^ data
-            // 0xef	RST 5	1		CALL $28
             // 0xf0	RP	1		if P, RET
-            0xF0 => self.op_ret(self.cc.p),
-            // 0xf2	JP adr	3		if P=1 PC <- adr
-            0xF2 => self.op_jump(self.cc.s),
+            0xF0 => self.op_ret(!self.cc.p),
+            // 0xf2	JP adr	3		if S=1 PC <- adr
+            0xF2 => self.op_jump(!self.cc.s),
             // 0xf3	DI	1		special
             0xF3 => self.inte = false,
             // 0xf4	CP adr	3		if P, PC <- adr
             // 0xf6	ORI D8	2	Z, S, P, CY, AC	A <- A | data
-            // 0xf7	RST 6	1		CALL $30
             // 0xf8	RM	1		if M, RET
             // 0xf9	SPHL	1		SP=HL
             // 0xfa	JM adr	3		if M, PC <- adr
-            0xFA => self.op_jump(!self.cc.s),
+            0xFA => self.op_jump(self.cc.s),
             // 0xfb	EI	1		special
             0xFB => self.inte = true,
             // 0xfc	CM adr	3		if M, CALL adr
             // 0xfd	-
-            // 0xfe	CPI D8	2	Z, S, P, CY, AC	A - data
-            // 0xff	RST 7	1		CALL $38
             _ => {
                 panic!("Invalid OP: {:02X}", op);
             }
